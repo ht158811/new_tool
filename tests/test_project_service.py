@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from dataset_manager.application.services.project_service import ProjectService
+from dataset_manager.domain.models.project import Dataset, TaskType
 from dataset_manager.infrastructure.storage.project_repository import JsonProjectRepository
 
 
@@ -22,6 +23,12 @@ class ProjectServiceTests(unittest.TestCase):
             service = ProjectService(JsonProjectRepository(Path(directory)))
             with self.assertRaises(ValueError):
                 service.create_project("   ")
+
+    def test_dataset_normalizes_string_task_type_before_persistence(self) -> None:
+        dataset = Dataset.create(
+            "Qt dataset", "D:\\data", "D:\\data", "D:\\data", "object_detection"
+        )
+        self.assertIs(dataset.task_type, TaskType.OBJECT_DETECTION)
 
 
 if __name__ == "__main__":

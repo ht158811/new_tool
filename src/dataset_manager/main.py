@@ -3,8 +3,16 @@ from __future__ import annotations
 import sys
 
 from dataset_manager.application.services.project_service import ProjectService
+from dataset_manager.application.services.scan_service import ScanService
+from dataset_manager.application.services.image_service import ImageService
+from dataset_manager.application.services.annotation_service import AnnotationService
+from dataset_manager.infrastructure.parsers.labelme_parser import LabelMeParser
 from dataset_manager.infrastructure.paths import AppPaths
+from dataset_manager.infrastructure.scanning.labelme_scanner import LabelMeDatasetScanner
+from dataset_manager.infrastructure.scanning.scan_cache import ScanCacheStore
+from dataset_manager.infrastructure.images import pillow_image_size
 from dataset_manager.infrastructure.storage.project_repository import JsonProjectRepository
+from dataset_manager.infrastructure.storage.labelme_annotation_store import LabelMeAnnotationStore
 
 
 def main() -> int:
@@ -17,10 +25,17 @@ def main() -> int:
 
     paths = AppPaths.discover()
     paths.ensure_directories()
-    service = ProjectService(JsonProjectRepository(paths.projects))
+    repository = JsonProjectRepository(paths.projects)
+    service = ProjectService(repository)
+    parser = LabelMeParser()
+    scanner = LabelMeDatasetScanner(parser, pillow_image_size)
+    cache_store = ScanCacheStore(paths.cache)
+    scan_service = ScanService(repository, scanner, cache_store)
+    image_service = ImageService(repository, cache_store)
+    annotation_service = AnnotationService(parser, LabelMeAnnotationStore())
     app = QApplication(sys.argv)
     app.setApplicationName("Dataset Manager")
-    window = MainWindow(service)
+    window = MainWindow(service, scan_service, image_service, annotation_service)
     window.show()
     return app.exec()
 

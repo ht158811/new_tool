@@ -11,6 +11,9 @@ class ProjectService:
     def list_projects(self) -> list[Project]:
         return self._repository.list()
 
+    def get_project(self, project_id: str) -> Project:
+        return self._repository.get(project_id)
+
     def create_project(self, name: str) -> Project:
         project = Project.create(name)
         self._repository.save(project)

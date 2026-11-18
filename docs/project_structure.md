@@ -5,7 +5,7 @@ src/dataset_manager/
 ├── domain/                 # 纯模型、枚举、领域规则
 ├── application/            # 用例服务与抽象端口
 ├── infrastructure/         # JSON、路径、解析器等适配器
-├── ui/                     # PySide6 窗口、页面、主题
+├── ui/                     # PySide6 窗口、页面、画布、后台 UI 工作线程和主题
 ├── main.py                 # 依赖装配与程序入口
 └── __main__.py
 tests/                      # 自动化测试与 fixtures

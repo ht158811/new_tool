@@ -18,6 +18,16 @@ class TaskType(str, Enum):
 
 
 @dataclass(slots=True)
+class ScanSummary:
+    image_count: int = 0
+    annotation_count: int = 0
+    paired_count: int = 0
+    issue_count: int = 0
+    category_count: int = 0
+    categories: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class Dataset:
     id: str
     name: str
@@ -27,6 +37,36 @@ class Dataset:
     task_type: TaskType
     data_format: str = "labelme"
     accessible: bool = True
+    active_scan_id: str | None = None
+    last_scanned_at: str | None = None
+    scan_summary: ScanSummary = field(default_factory=ScanSummary)
+
+    def __post_init__(self) -> None:
+        # Qt item data serializes str-based enums as plain strings. Normalize at
+        # the domain boundary so scanners and persistence always see TaskType.
+        if not isinstance(self.task_type, TaskType):
+            self.task_type = TaskType(self.task_type)
+
+    @classmethod
+    def create(
+        cls,
+        name: str,
+        root_path: str,
+        image_directory: str,
+        annotation_directory: str,
+        task_type: TaskType | str,
+    ) -> "Dataset":
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("数据集名称不能为空")
+        return cls(
+            id=uuid4().hex,
+            name=clean_name,
+            root_path=root_path,
+            image_directory=image_directory,
+            annotation_directory=annotation_directory,
+            task_type=task_type,
+        )
 
 
 @dataclass(slots=True)
@@ -49,15 +89,20 @@ class Project:
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         for dataset in data["datasets"]:
-            dataset["task_type"] = dataset["task_type"].value
+            task_type = dataset["task_type"]
+            dataset["task_type"] = (
+                task_type.value if isinstance(task_type, TaskType) else TaskType(task_type).value
+            )
         return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Project":
-        datasets = [
-            Dataset(**{**item, "task_type": TaskType(item["task_type"])})
-            for item in data.get("datasets", [])
-        ]
+        datasets = []
+        for item in data.get("datasets", []):
+            dataset_data = dict(item)
+            dataset_data["task_type"] = TaskType(dataset_data["task_type"])
+            dataset_data["scan_summary"] = ScanSummary(**dataset_data.get("scan_summary", {}))
+            datasets.append(Dataset(**dataset_data))
         return cls(
             id=str(data["id"]),
             name=str(data["name"]),
@@ -66,4 +111,10 @@ class Project:
             datasets=datasets,
             schema_version=int(data.get("schema_version", 1)),
         )
+
+    def find_dataset(self, dataset_id: str) -> Dataset:
+        for dataset in self.datasets:
+            if dataset.id == dataset_id:
+                return dataset
+        raise KeyError(dataset_id)
 
