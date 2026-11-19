@@ -22,6 +22,7 @@ class ScanSummary:
     image_count: int = 0
     annotation_count: int = 0
     paired_count: int = 0
+    valid_annotation_image_count: int = 0
     issue_count: int = 0
     category_count: int = 0
     categories: list[str] = field(default_factory=list)

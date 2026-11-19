@@ -8,12 +8,15 @@ from PySide6.QtWidgets import (
 )
 
 from dataset_manager.application.services.project_service import ProjectService
+from dataset_manager.application.services.dataset_service import DatasetService
 from dataset_manager.application.services.scan_service import ScanService
 from dataset_manager.application.services.image_service import ImageService
 from dataset_manager.application.services.annotation_service import AnnotationService
+from dataset_manager.application.preprocessing.preprocessing_service import PreprocessingService
 from dataset_manager.ui.dialogs.add_dataset_dialog import AddDatasetDialog
 from dataset_manager.ui.pages.home_page import HomePage
 from dataset_manager.ui.pages.image_browser_page import ImageBrowserPage
+from dataset_manager.ui.pages.preprocessing_page import PreprocessingPage
 from dataset_manager.ui.themes import Theme, stylesheet
 from dataset_manager.ui.workers.scan_worker import ScanWorker
 
@@ -22,12 +25,15 @@ class MainWindow(QMainWindow):
     def __init__(
         self,
         project_service: ProjectService,
+        dataset_service: DatasetService,
         scan_service: ScanService,
         image_service: ImageService,
         annotation_service: AnnotationService,
+        preprocessing_service: PreprocessingService,
     ) -> None:
         super().__init__()
         self._project_service = project_service
+        self._dataset_service = dataset_service
         self._scan_service = scan_service
         self._scan_workers: set[ScanWorker] = set()
         self._theme = Theme.LIGHT
@@ -55,17 +61,23 @@ class MainWindow(QMainWindow):
         self._home = HomePage(self._project_service.list_projects)
         self._home.create_requested.connect(self._create_project)
         self._home.delete_requested.connect(self._delete_project)
+        self._home.delete_dataset_requested.connect(self._delete_dataset)
         self._home.add_dataset_requested.connect(self._add_dataset)
         self._home.refresh_dataset_requested.connect(self._refresh_dataset)
+        self._home.dataset_selection_changed.connect(self._set_preprocessing_dataset)
         self._stack.addWidget(self._home)
         self._image_browser = ImageBrowserPage(
             self._project_service, image_service, annotation_service
         )
         self._stack.addWidget(self._image_browser)
+        self._preprocessing = PreprocessingPage(
+            self._project_service, preprocessing_service
+        )
+        self._stack.addWidget(self._preprocessing)
 
         button_group = QButtonGroup(self)
         button_group.setExclusive(True)
-        for index, name in enumerate(("项目首页", "图片浏览", "质量检查", "数据统计", "系统设置")):
+        for index, name in enumerate(("项目首页", "图片浏览", "数据预处理", "数据统计", "系统设置")):
             button = QPushButton(name)
             button.setCheckable(True)
             button_group.addButton(button)
@@ -75,6 +87,8 @@ class MainWindow(QMainWindow):
                 button.clicked.connect(lambda: self._stack.setCurrentIndex(0))
             elif index == 1:
                 button.clicked.connect(lambda checked=False: self._stack.setCurrentIndex(1))
+            elif index == 2:
+                button.clicked.connect(self._open_preprocessing)
             else:
                 page = self._placeholder(name)
                 self._stack.addWidget(page)
@@ -103,6 +117,15 @@ class MainWindow(QMainWindow):
     def _toggle_theme(self) -> None:
         self._theme = Theme.DARK if self._theme is Theme.LIGHT else Theme.LIGHT
         self.setStyleSheet(stylesheet(self._theme))
+
+    def _set_preprocessing_dataset(self, project_id: str, dataset_id: str) -> None:
+        self._preprocessing.set_dataset(project_id, dataset_id)
+
+    def _open_preprocessing(self, checked: bool = False) -> None:
+        del checked
+        project_id, dataset_id = self._home.selected_dataset_context()
+        self._preprocessing.set_dataset(project_id, dataset_id)
+        self._stack.setCurrentIndex(2)
 
     def _create_project(self) -> None:
         name, accepted = QInputDialog.getText(self, "创建项目", "项目名称：")
@@ -172,7 +195,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "数据集扫描完成",
-                f"完整扫描已提交。共发现 {issue_count} 个需检查项。",
+                f"完整扫描已提交。共发现 {issue_count} 个异常项。",
             )
 
         def failed(message: str) -> None:
@@ -200,14 +223,23 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _delete_project(self, project_id: str) -> None:
-        answer = QMessageBox.warning(
+        try:
+            project = self._project_service.get_project(project_id)
+        except KeyError:
+            QMessageBox.warning(self, "项目不存在", "所选项目已不存在，项目列表将刷新。")
+            self._home.refresh()
+            return
+        answer = QMessageBox.question(
             self,
             "确认删除",
-            "只删除此项目的管理信息。外部原始数据集不会被删除。是否继续？",
+            f"项目：{project.name}\n"
+            f"包含数据集：{len(project.datasets)} 个\n\n"
+            "将只删除此项目的管理信息。外部原始图片和 JSON 不会被删除。\n"
+            "是否继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-        if answer is not QMessageBox.StandardButton.Yes:
+        if answer != QMessageBox.StandardButton.Yes:
             return
         try:
             self._project_service.delete_project_management_info(project_id)
@@ -216,8 +248,53 @@ class MainWindow(QMainWindow):
             return
         self._home.refresh()
         self._image_browser.reload_sources()
+        QMessageBox.information(
+            self,
+            "删除完成",
+            f"项目“{project.name}”的管理信息已删除。\n外部数据文件未修改。",
+        )
+
+    def _delete_dataset(self, project_id: str, dataset_id: str) -> None:
+        if self._scan_service.is_running(dataset_id):
+            QMessageBox.warning(self, "无法删除", "该数据集正在扫描，请等待扫描结束或先取消扫描。")
+            return
+        try:
+            project = self._project_service.get_project(project_id)
+            dataset = project.find_dataset(dataset_id)
+        except KeyError:
+            QMessageBox.warning(self, "数据集不存在", "所选数据集已不存在，页面将刷新。")
+            self._home.refresh()
+            self._image_browser.reload_sources()
+            return
+        answer = QMessageBox.question(
+            self,
+            "确认删除数据集管理信息",
+            f"项目：{project.name}\n"
+            f"数据集：{dataset.name}\n"
+            f"路径：{dataset.root_path}\n\n"
+            "只会从项目中移除此数据集并清理扫描缓存。\n"
+            "外部图片和 JSON 不会被删除。是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            result = self._dataset_service.delete_dataset_management_info(
+                project_id, dataset_id
+            )
+        except (OSError, KeyError, ValueError) as error:
+            QMessageBox.critical(self, "删除失败", str(error))
+            return
+        self._home.refresh()
+        self._image_browser.reload_sources()
+        message = f"数据集“{dataset.name}”的管理信息已删除。\n外部数据文件未修改。"
+        if result.cache_cleanup_warning:
+            message += f"\n\n{result.cache_cleanup_warning}"
+        QMessageBox.information(self, "删除完成", message)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        self._preprocessing.shutdown()
         for worker in tuple(self._scan_workers):
             worker.request_cancel()
             worker.wait(3000)

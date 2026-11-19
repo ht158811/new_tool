@@ -15,8 +15,10 @@ from dataset_manager.domain.models.project import Project
 class HomePage(QWidget):
     create_requested = Signal()
     delete_requested = Signal(str)
+    delete_dataset_requested = Signal(str, str)
     add_dataset_requested = Signal(str)
     refresh_dataset_requested = Signal(str, str)
+    dataset_selection_changed = Signal(str, str)
 
     def __init__(self, project_loader: Callable[[], list[Project]]) -> None:
         super().__init__()
@@ -45,36 +47,49 @@ class HomePage(QWidget):
         self._project_count = self._card("项目", "0")
         self._dataset_count = self._card("数据集", "0")
         self._image_count = self._card("图片", "—")
+        self._valid_annotation_count = self._card("有效标注图片", "0")
         cards.addWidget(self._project_count)
         cards.addWidget(self._dataset_count)
         cards.addWidget(self._image_count)
+        cards.addWidget(self._valid_annotation_count)
         root.addLayout(cards)
 
         section = QLabel("项目列表")
         section.setStyleSheet("font-size: 18px; font-weight: 600;")
         root.addWidget(section)
         browser = QHBoxLayout()
+        project_column = QVBoxLayout()
         self._list = QListWidget()
         self._list.setAlternatingRowColors(True)
         self._list.currentItemChanged.connect(self._show_project_datasets)
+        self._list.currentItemChanged.connect(self._update_action_buttons)
         self._dataset_list = QListWidget()
         self._dataset_list.setAlternatingRowColors(True)
-        browser.addWidget(self._list, 1)
-        browser.addWidget(self._dataset_list, 2)
+        self._dataset_list.currentItemChanged.connect(self._update_action_buttons)
+        self._dataset_list.currentItemChanged.connect(self._emit_dataset_selection_changed)
+        self._delete_project_button = QPushButton("删除选中项目的管理信息")
+        self._delete_project_button.clicked.connect(self._emit_delete)
+        project_column.addWidget(self._list, 1)
+        project_column.addWidget(self._delete_project_button)
+        dataset_column = QVBoxLayout()
+        self._delete_dataset_button = QPushButton("删除选中数据集的管理信息")
+        self._delete_dataset_button.clicked.connect(self._emit_delete_dataset)
+        dataset_column.addWidget(self._dataset_list, 1)
+        dataset_column.addWidget(self._delete_dataset_button)
+        browser.addLayout(project_column, 1)
+        browser.addLayout(dataset_column, 2)
         root.addLayout(browser, 1)
 
         action_row = QHBoxLayout()
-        add_dataset_button = QPushButton("＋ 向选中项目添加数据集")
-        add_dataset_button.clicked.connect(self._emit_add_dataset)
-        refresh_button = QPushButton("刷新选中数据集")
-        refresh_button.clicked.connect(self._emit_refresh_dataset)
-        delete_button = QPushButton("删除选中项目的管理信息")
-        delete_button.clicked.connect(self._emit_delete)
+        self._add_dataset_button = QPushButton("＋ 向选中项目添加数据集")
+        self._add_dataset_button.clicked.connect(self._emit_add_dataset)
+        self._refresh_button = QPushButton("刷新选中数据集")
+        self._refresh_button.clicked.connect(self._emit_refresh_dataset)
         action_row.addStretch()
-        action_row.addWidget(add_dataset_button)
-        action_row.addWidget(refresh_button)
-        action_row.addWidget(delete_button)
+        action_row.addWidget(self._add_dataset_button)
+        action_row.addWidget(self._refresh_button)
         root.addLayout(action_row)
+        self._delete_button = self._delete_project_button
         self.refresh()
 
     @staticmethod
@@ -97,12 +112,19 @@ class HomePage(QWidget):
         self._dataset_list.clear()
         dataset_count = 0
         image_count = 0
+        valid_annotation_count = 0
         for project in projects:
             dataset_count += len(project.datasets)
             project_images = sum(dataset.scan_summary.image_count for dataset in project.datasets)
+            project_valid_annotations = sum(
+                dataset.scan_summary.valid_annotation_image_count
+                for dataset in project.datasets
+            )
             image_count += project_images
+            valid_annotation_count += project_valid_annotations
             item = QListWidgetItem(
-                f"{project.name}    ·    {len(project.datasets)} 个数据集    ·    {project_images} 张图片"
+                f"{project.name}    ·    {len(project.datasets)} 个数据集    ·    "
+                f"{project_images} 张图片    ·    {project_valid_annotations} 张有效标注"
             )
             item.setData(Qt.ItemDataRole.UserRole, project.id)
             item.setData(Qt.ItemDataRole.UserRole + 1, project)
@@ -112,8 +134,10 @@ class HomePage(QWidget):
         self._set_card_value(self._project_count, str(len(projects)))
         self._set_card_value(self._dataset_count, str(dataset_count))
         self._set_card_value(self._image_count, str(image_count))
+        self._set_card_value(self._valid_annotation_count, str(valid_annotation_count))
         if self._list.currentItem() is None and self._list.count():
             self._list.setCurrentRow(0)
+        self._update_action_buttons()
 
     @staticmethod
     def _set_card_value(card: QFrame, value: str) -> None:
@@ -139,6 +163,23 @@ class HomePage(QWidget):
                 project_id, str(item.data(Qt.ItemDataRole.UserRole))
             )
 
+    def _emit_delete_dataset(self) -> None:
+        project_id = self._selected_project_id()
+        item = self._dataset_list.currentItem()
+        if project_id and item is not None:
+            self.delete_dataset_requested.emit(
+                project_id, str(item.data(Qt.ItemDataRole.UserRole))
+            )
+
+    def _emit_dataset_selection_changed(self, *args) -> None:
+        del args
+        project_id = self._selected_project_id()
+        item = self._dataset_list.currentItem()
+        if project_id and item is not None:
+            self.dataset_selection_changed.emit(
+                project_id, str(item.data(Qt.ItemDataRole.UserRole))
+            )
+
     def _show_project_datasets(self, current: QListWidgetItem | None) -> None:
         self._dataset_list.clear()
         if current is None:
@@ -148,7 +189,8 @@ class HomePage(QWidget):
             summary = dataset.scan_summary
             item = QListWidgetItem(
                 f"{dataset.name}    ·    {summary.image_count} 张图片    ·    "
-                f"{summary.category_count} 个类别    ·    {summary.issue_count} 个检查项\n"
+                f"{summary.valid_annotation_image_count} 张有效标注    ·    "
+                f"{summary.category_count} 个类别    ·    {summary.issue_count} 个异常项\n"
                 f"{Path(dataset.root_path)}"
             )
             item.setData(Qt.ItemDataRole.UserRole, dataset.id)
@@ -161,4 +203,19 @@ class HomePage(QWidget):
         if item is None:
             return None
         return str(item.data(Qt.ItemDataRole.UserRole))
+
+    def selected_dataset_context(self) -> tuple[str | None, str | None]:
+        project_id = self._selected_project_id()
+        item = self._dataset_list.currentItem()
+        dataset_id = str(item.data(Qt.ItemDataRole.UserRole)) if item is not None else None
+        return project_id, dataset_id
+
+    def _update_action_buttons(self, *args) -> None:
+        del args
+        has_project = self._list.currentItem() is not None
+        has_dataset = has_project and self._dataset_list.currentItem() is not None
+        self._add_dataset_button.setEnabled(has_project)
+        self._delete_project_button.setEnabled(has_project)
+        self._refresh_button.setEnabled(has_dataset)
+        self._delete_dataset_button.setEnabled(has_dataset)
 

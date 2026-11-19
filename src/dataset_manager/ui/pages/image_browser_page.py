@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, QPointF, QTimer, Qt
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
@@ -31,6 +32,7 @@ class ImageBrowserPage(QWidget):
         self._annotation_service = annotation_service
         self._images: list[BrowserImage] = []
         self._current_image: BrowserImage | None = None
+        self._current_document = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 20, 24, 20)
@@ -81,6 +83,7 @@ class ImageBrowserPage(QWidget):
         self._filename.setPlaceholderText("按文件名筛选")
         self._category = QComboBox()
         self._category.addItem("请选择类别", None)
+        self._category.addItem("全部类别", "")
         self._category.currentIndexChanged.connect(self._category_selected)
         apply_button = QPushButton("应用筛选")
         apply_button.clicked.connect(self.refresh_images)
@@ -99,6 +102,16 @@ class ImageBrowserPage(QWidget):
         valid_legend.setStyleSheet("color: #22c55e; font-weight: 600;")
         action_row.addWidget(valid_legend)
         action_row.addStretch()
+        self._delete_shape_button = QPushButton("删除标注框…")
+        self._delete_shape_button.setObjectName("deleteShapeButton")
+        self._delete_shape_button.clicked.connect(self._delete_current_shape)
+        self._delete_shape_button.setEnabled(False)
+        action_row.addWidget(self._delete_shape_button)
+        self._delete_json_button = QPushButton("删除 JSON…")
+        self._delete_json_button.setObjectName("deleteAnnotationButton")
+        self._delete_json_button.clicked.connect(self._delete_current_annotation)
+        self._delete_json_button.setEnabled(False)
+        action_row.addWidget(self._delete_json_button)
         self._overlay = QCheckBox("显示标注")
         self._overlay.setChecked(True)
         self._overlay.toggled.connect(self._toggle_overlay)
@@ -128,13 +141,24 @@ class ImageBrowserPage(QWidget):
         image_layout = QVBoxLayout(image_column)
         image_layout.setContentsMargins(0, 0, 0, 0)
         zoom_row = QHBoxLayout()
+        self._previous_button = QPushButton("← 上一张")
+        self._previous_button.setObjectName("previousImageButton")
+        self._previous_button.clicked.connect(lambda: self._navigate_image(-1))
+        self._next_button = QPushButton("下一张 →")
+        self._next_button.setObjectName("nextImageButton")
+        self._next_button.clicked.connect(lambda: self._navigate_image(1))
+        self._position_label = QLabel("0 / 0")
         fit_button = QPushButton("适应窗口")
         fit_button.clicked.connect(self._fit_image)
         zoom_out_button = QPushButton("－")
-        zoom_out_button.clicked.connect(lambda: self._canvas.zoom_by(0.8))
+        zoom_out_button.clicked.connect(lambda: self._zoom_at_viewport_center(0.8))
         zoom_in_button = QPushButton("＋")
-        zoom_in_button.clicked.connect(lambda: self._canvas.zoom_by(1.25))
+        zoom_in_button.clicked.connect(lambda: self._zoom_at_viewport_center(1.25))
         self._zoom_label = QLabel("100%")
+        zoom_row.addWidget(self._previous_button)
+        zoom_row.addWidget(self._next_button)
+        zoom_row.addWidget(self._position_label)
+        zoom_row.addSpacing(12)
         zoom_row.addWidget(fit_button)
         zoom_row.addWidget(zoom_out_button)
         zoom_row.addWidget(zoom_in_button)
@@ -158,6 +182,7 @@ class ImageBrowserPage(QWidget):
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 3)
         root.addWidget(splitter, 1)
+        self._update_navigation()
         self.reload_sources()
 
     def reload_sources(self) -> None:
@@ -175,7 +200,12 @@ class ImageBrowserPage(QWidget):
         project_id = self._project_combo.currentData()
         dataset_id = self._dataset_combo.currentData()
         category = self._category.currentData()
-        if not project_id or not dataset_id or not isinstance(category, str) or not category:
+        if (
+            not project_id
+            or not dataset_id
+            or self._category.currentIndex() <= 0
+            or not isinstance(category, str)
+        ):
             self._images = []
             self._populate(waiting_for_category=True)
             return
@@ -217,6 +247,7 @@ class ImageBrowserPage(QWidget):
         self._category.blockSignals(True)
         self._category.clear()
         self._category.addItem("请选择类别", None)
+        self._category.addItem("全部类别", "")
         project_id = self._project_combo.currentData()
         dataset_id = self._dataset_combo.currentData()
         if project_id and dataset_id:
@@ -233,7 +264,9 @@ class ImageBrowserPage(QWidget):
     def _populate(self, waiting_for_category: bool = False) -> None:
         self._list.clear()
         self._current_image = None
+        self._current_document = None
         self._canvas.clear()
+        self._update_delete_actions()
         self._details.setPlainText("选择图片后显示标注信息")
         self._result_label.setText(
             "请选择类别" if waiting_for_category else f"{len(self._images)} 张图片"
@@ -246,21 +279,27 @@ class ImageBrowserPage(QWidget):
                 item.setForeground(QBrush(QColor("#22c55e")))
             item.setToolTip(
                 f"{image.image_path}\n类别：{', '.join(image.categories) or '无'}\n"
-                f"检查项：{image.issue_count}"
+                f"异常项：{image.issue_count}"
             )
             self._list.addItem(item)
         if self._list.count():
             self._list.setCurrentRow(0)
+        else:
+            self._update_navigation()
 
     def _preview_item(self, current: QListWidgetItem | None) -> None:
+        self._update_navigation()
         if current is None:
             self._current_image = None
+            self._current_document = None
             self._canvas.clear()
+            self._update_delete_actions()
             return
         image = current.data(Qt.ItemDataRole.UserRole)
         self._current_image = image
         result = self._annotation_service.read(image.annotation_path, image.image_path)
         document = result.document if result is not None else None
+        self._current_document = document
         self._canvas.set_content(image.image_path, document)
         self._fit_image()
         shape_lines = []
@@ -275,9 +314,10 @@ class ImageBrowserPage(QWidget):
             f"图片路径：{image.image_path}\n"
             f"JSON 路径：{image.annotation_path or '无'}\n"
             f"尺寸：{image.width or '?'} × {image.height or '?'}\n"
-            f"类别：{', '.join(image.categories) or '无'}\n检查项：{issue_count}\n"
+            f"类别：{', '.join(image.categories) or '无'}\n异常项：{issue_count}\n"
             + ("标注：\n" + "\n".join(shape_lines) if shape_lines else "标注：无")
         )
+        self._update_delete_actions()
 
     def _toggle_overlay(self, checked: bool) -> None:
         self._canvas.set_annotations_visible(checked)
@@ -308,6 +348,94 @@ class ImageBrowserPage(QWidget):
         self._edit_status.setStyleSheet("color: #22c55e; font-weight: 600;")
         self._preview_item(self._list.currentItem())
 
+    def _delete_current_shape(self) -> None:
+        image = self._current_image
+        document = self._current_document
+        if image is None or image.annotation_path is None or document is None:
+            return
+        if not document.shapes:
+            return
+        choices = [
+            f"#{index + 1}  {shape.label} · {shape.shape_type or 'unknown'}"
+            for index, shape in enumerate(document.shapes)
+        ]
+        selected, accepted = QInputDialog.getItem(
+            self, "选择要删除的标注框", "标注：", choices, 0, False
+        )
+        if not accepted:
+            return
+        shape_index = choices.index(selected)
+        shape = document.shapes[shape_index]
+        answer = QMessageBox.question(
+            self,
+            "确认删除标注框",
+            f"将从 JSON 中删除第 {shape_index + 1} 个标注：{shape.label}\n"
+            "图片文件不会被删除。此操作会立即写入 JSON，是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._annotation_service.delete_shape(image.annotation_path, shape_index)
+        except (OSError, ValueError, IndexError) as error:
+            QMessageBox.critical(self, "删除标注框失败", str(error))
+            return
+        self._edit_status.setText("标注框已删除并原子写入 JSON。刷新数据集后更新类别索引。")
+        self._edit_status.setStyleSheet("color: #22c55e; font-weight: 600;")
+        self._preview_item(self._list.currentItem())
+
+    def _delete_current_annotation(self) -> None:
+        image = self._current_image
+        if image is None or image.annotation_path is None:
+            return
+        annotation_path = Path(image.annotation_path)
+        answer = QMessageBox.question(
+            self,
+            "确认删除 JSON 标注",
+            f"即将永久删除：{annotation_path.name}\n\n"
+            "对应图片不会被删除，但此 JSON 文件删除后无法通过软件恢复。是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._annotation_service.delete_annotation(image.annotation_path)
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(self, "删除 JSON 失败", str(error))
+            return
+        updated = replace(
+            image,
+            annotation_path=None,
+            categories=(),
+            annotation_valid=False,
+        )
+        row = self._list.currentRow()
+        item = self._list.currentItem()
+        if 0 <= row < len(self._images):
+            self._images[row] = updated
+        if item is not None:
+            item.setData(Qt.ItemDataRole.UserRole, updated)
+            item.setForeground(QBrush())
+            item.setToolTip(f"{updated.image_path}\n类别：无\nJSON 已删除")
+        self._current_image = updated
+        self._edit_status.setText("JSON 标注文件已删除，图片保留。请刷新数据集更新扫描索引。")
+        self._edit_status.setStyleSheet("color: #f59e0b; font-weight: 600;")
+        self._preview_item(item)
+
+    def _update_delete_actions(self) -> None:
+        has_json = bool(
+            self._current_image is not None and self._current_image.annotation_path
+        )
+        has_shapes = bool(
+            has_json
+            and self._current_document is not None
+            and self._current_document.shapes
+        )
+        self._delete_shape_button.setEnabled(has_shapes)
+        self._delete_json_button.setEnabled(has_json)
+
     def _reset_filters(self) -> None:
         self._filename.clear()
         self._category.setCurrentIndex(0)
@@ -321,8 +449,62 @@ class ImageBrowserPage(QWidget):
             return
         self.refresh_images()
 
+    def _navigate_image(self, offset: int) -> None:
+        count = self._list.count()
+        if count <= 0:
+            return
+        current = self._list.currentRow()
+        if current < 0:
+            current = 0 if offset >= 0 else count - 1
+        target = max(0, min(count - 1, current + offset))
+        if target != current or self._list.currentRow() < 0:
+            self._list.setCurrentRow(target)
+            self._list.scrollToItem(self._list.item(target))
+        self._update_navigation()
+
+    def _update_navigation(self) -> None:
+        count = self._list.count()
+        row = self._list.currentRow()
+        has_current = 0 <= row < count
+        self._previous_button.setEnabled(has_current and row > 0)
+        self._next_button.setEnabled(has_current and row < count - 1)
+        self._position_label.setText(f"{row + 1 if has_current else 0} / {count}")
+
     def _fit_image(self) -> None:
         self._canvas.fit_to(self._image_scroll.viewport().size())
+
+    def _zoom_at_viewport_center(self, factor: float) -> None:
+        self._zoom_at(factor, QPointF(self._image_scroll.viewport().rect().center()))
+
+    def _zoom_at(self, factor: float, viewport_position: QPointF) -> None:
+        old_width = self._canvas.width()
+        old_height = self._canvas.height()
+        if old_width <= 0 or old_height <= 0:
+            return
+        viewport = self._image_scroll.viewport()
+        horizontal = self._image_scroll.horizontalScrollBar()
+        vertical = self._image_scroll.verticalScrollBar()
+        offset_x = max(0.0, (viewport.width() - old_width) / 2)
+        offset_y = max(0.0, (viewport.height() - old_height) / 2)
+        image_ratio_x = (
+            horizontal.value() + viewport_position.x() - offset_x
+        ) / old_width
+        image_ratio_y = (
+            vertical.value() + viewport_position.y() - offset_y
+        ) / old_height
+        image_ratio_x = max(0.0, min(1.0, image_ratio_x))
+        image_ratio_y = max(0.0, min(1.0, image_ratio_y))
+
+        self._canvas.zoom_by(factor)
+        new_horizontal = round(image_ratio_x * self._canvas.width() - viewport_position.x())
+        new_vertical = round(image_ratio_y * self._canvas.height() - viewport_position.y())
+
+        def restore_anchor() -> None:
+            horizontal.setValue(new_horizontal)
+            vertical.setValue(new_vertical)
+
+        restore_anchor()
+        QTimer.singleShot(0, restore_anchor)
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API name
         if (
@@ -330,7 +512,10 @@ class ImageBrowserPage(QWidget):
             and event.type() == QEvent.Type.Wheel
             and event.modifiers() & Qt.KeyboardModifier.ControlModifier
         ):
-            self._canvas.zoom_by(1.2 if event.angleDelta().y() > 0 else 1 / 1.2)
+            self._zoom_at(
+                1.2 if event.angleDelta().y() > 0 else 1 / 1.2,
+                event.position(),
+            )
             event.accept()
             return True
         return super().eventFilter(watched, event)

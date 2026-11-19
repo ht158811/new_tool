@@ -1,19 +1,29 @@
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PIL import Image
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QFrame, QScrollArea, QSpinBox, QSplitter, QTextEdit
+from PySide6.QtTest import QSignalSpy
+from PySide6.QtWidgets import (
+    QApplication, QFrame, QInputDialog, QLabel, QMessageBox, QScrollArea, QSpinBox,
+    QSplitter, QTextEdit,
+)
 
 from dataset_manager.application.dto.image_record import BrowserImage
+from dataset_manager.application.services.annotation_service import AnnotationService
 from dataset_manager.domain.models.project import Dataset, Project, ScanSummary, TaskType
+from dataset_manager.infrastructure.parsers.labelme_parser import LabelMeParser
+from dataset_manager.infrastructure.storage.labelme_annotation_store import LabelMeAnnotationStore
 from dataset_manager.ui.pages.image_browser_page import ImageBrowserPage
+from dataset_manager.ui.pages.home_page import HomePage
 
 
 class _ProjectService:
@@ -29,16 +39,25 @@ class _ProjectService:
 
 
 class _ImageService:
-    def __init__(self, image_path: str) -> None:
-        self.image_path = image_path
+    def __init__(self, image_path: str | list[str], annotation_path: str | None = None) -> None:
+        self.image_paths = [image_path] if isinstance(image_path, str) else image_path
+        self.annotation_path = annotation_path
         self.list_calls = 0
+        self.last_category: str | None = None
 
     def categories(self, project_id: str, dataset_id: str) -> list[str]:
         return ["scratch", "dent"]
 
     def list_images(self, project_id: str, dataset_id: str, query) -> list[BrowserImage]:
         self.list_calls += 1
-        return [BrowserImage(self.image_path, None, 32, 24, (query.category,), 0, False)]
+        self.last_category = query.category
+        return [
+            BrowserImage(
+                path, self.annotation_path, 32, 24, ("scratch",), 0,
+                self.annotation_path is not None,
+            )
+            for path in self.image_paths
+        ]
 
 
 class _AnnotationService:
@@ -72,6 +91,7 @@ class ImageBrowserPageTests(unittest.TestCase):
             self.assertEqual(page._result_label.text(), "请选择类别")
             self.assertEqual(image_service.list_calls, 0)
             self.assertEqual(page._category.currentText(), "请选择类别")
+            self.assertEqual(page._category.itemText(1), "全部类别")
             self.assertIsNotNone(page.findChild(QScrollArea))
             self.assertIsInstance(page._details, QTextEdit)
             self.assertEqual(page._details.lineWrapMode(), QTextEdit.LineWrapMode.NoWrap)
@@ -96,10 +116,136 @@ class ImageBrowserPageTests(unittest.TestCase):
             page._category.setCurrentIndex(1)
 
             self.assertEqual(image_service.list_calls, 1)
+            self.assertEqual(image_service.last_category, "")
             self.assertEqual(page._list.count(), 1)
             self.assertEqual(page._list.item(0).text(), "sample.jpg")
             self.assertTrue(page._list.item(0).icon().isNull())
+
+            page._category.setCurrentIndex(2)
+            self.assertEqual(image_service.last_category, "scratch")
             page.close()
+
+    def test_previous_and_next_buttons_browse_filtered_images(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = []
+            for name in ("a.jpg", "b.jpg", "c.jpg"):
+                path = Path(directory) / name
+                Image.new("RGB", (32, 24), "white").save(path)
+                paths.append(str(path))
+            project = Project.create("P")
+            dataset = Dataset.create(
+                "D", directory, directory, directory, TaskType.OBJECT_DETECTION
+            )
+            dataset.scan_summary = ScanSummary(categories=["scratch"], category_count=1)
+            project.datasets.append(dataset)
+            page = ImageBrowserPage(
+                _ProjectService(project), _ImageService(paths), _AnnotationService()
+            )
+
+            page._category.setCurrentIndex(1)
+            self.assertEqual(page._list.currentRow(), 0)
+            self.assertEqual(page._position_label.text(), "1 / 3")
+            self.assertFalse(page._previous_button.isEnabled())
+            self.assertTrue(page._next_button.isEnabled())
+
+            page._next_button.click()
+            self.assertEqual(page._list.currentRow(), 1)
+            self.assertEqual(page._position_label.text(), "2 / 3")
+            page._next_button.click()
+            self.assertEqual(page._list.currentRow(), 2)
+            self.assertFalse(page._next_button.isEnabled())
+            page._previous_button.click()
+            self.assertEqual(page._list.currentRow(), 1)
+            page.close()
+
+    def test_delete_shape_and_json_actions_update_files_and_ui(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "sample.jpg"
+            annotation_path = Path(directory) / "sample.json"
+            Image.new("RGB", (32, 24), "white").save(image_path)
+            annotation_path.write_text(json.dumps({
+                "shapes": [
+                    {
+                        "label": "box", "points": [[1, 1], [10, 10]],
+                        "shape_type": "rectangle", "flags": {},
+                    },
+                    {
+                        "label": "other", "points": [[12, 2], [20, 12]],
+                        "shape_type": "rectangle", "flags": {},
+                    },
+                ],
+                "imagePath": image_path.name,
+                "imageData": None,
+                "imageWidth": 32,
+                "imageHeight": 24,
+            }), encoding="utf-8")
+            project = Project.create("P")
+            dataset = Dataset.create(
+                "D", directory, directory, directory, TaskType.OBJECT_DETECTION
+            )
+            dataset.scan_summary = ScanSummary(categories=["box"], category_count=1)
+            project.datasets.append(dataset)
+            page = ImageBrowserPage(
+                _ProjectService(project),
+                _ImageService(str(image_path), str(annotation_path)),
+                AnnotationService(LabelMeParser(), LabelMeAnnotationStore()),
+            )
+            page._category.setCurrentIndex(1)
+            self.assertTrue(page._delete_shape_button.isEnabled())
+            self.assertTrue(page._delete_json_button.isEnabled())
+
+            with patch.object(
+                QInputDialog, "getItem", return_value=("#1  box · rectangle", True)
+            ), patch.object(
+                QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes
+            ):
+                page._delete_current_shape()
+            remaining = json.loads(annotation_path.read_text(encoding="utf-8"))["shapes"]
+            self.assertEqual([shape["label"] for shape in remaining], ["other"])
+            self.assertTrue(image_path.exists())
+
+            with patch.object(
+                QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes
+            ):
+                page._delete_current_annotation()
+            self.assertFalse(annotation_path.exists())
+            self.assertTrue(image_path.exists())
+            self.assertFalse(page._delete_shape_button.isEnabled())
+            self.assertFalse(page._delete_json_button.isEnabled())
+            self.assertIsNone(page._list.currentItem().data(Qt.ItemDataRole.UserRole).annotation_path)
+            page.close()
+
+    def test_home_page_shows_valid_annotations_and_anomaly_wording(self) -> None:
+        project = Project.create("P")
+        dataset = Dataset.create(
+            "D", "D:\\data", "D:\\data", "D:\\data", TaskType.OBJECT_DETECTION
+        )
+        dataset.scan_summary = ScanSummary(
+            image_count=4,
+            annotation_count=1,
+            paired_count=1,
+            valid_annotation_image_count=1,
+            issue_count=3,
+            category_count=1,
+            categories=["scratch"],
+        )
+        project.datasets.append(dataset)
+        page = HomePage(lambda: [project])
+
+        value = page._valid_annotation_count.findChild(QLabel, "value")
+        self.assertEqual(value.text(), "1")
+        dataset_text = page._dataset_list.item(0).text()
+        self.assertIn("1 张有效标注", dataset_text)
+        self.assertIn("3 个异常项", dataset_text)
+        self.assertTrue(page._delete_project_button.isEnabled())
+        self.assertTrue(page._delete_dataset_button.isEnabled())
+        project_delete = QSignalSpy(page.delete_requested)
+        dataset_delete = QSignalSpy(page.delete_dataset_requested)
+        page._delete_project_button.click()
+        page._delete_dataset_button.click()
+        self.assertEqual(project_delete.at(0), [project.id])
+        self.assertEqual(dataset_delete.at(0), [project.id, dataset.id])
+        page.close()
 
 
 if __name__ == "__main__":

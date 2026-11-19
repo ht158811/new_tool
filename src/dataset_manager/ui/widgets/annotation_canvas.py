@@ -143,9 +143,9 @@ class AnnotationCanvas(QWidget):
         color = self._label_color(shape.label)
         pen = QPen(color, 2.0)
         painter.setPen(pen)
-        painter.setBrush(QColor(color.red(), color.green(), color.blue(), 45))
         points = [QPointF(left + x * scale, top + y * scale) for x, y in shape.points]
         if shape.shape_type == "rectangle" and len(points) >= 2:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
             bounds = self._shape_bounding_rect(shape)
             if bounds is None:
                 return
@@ -156,6 +156,7 @@ class AnnotationCanvas(QWidget):
                 bounds.height() * scale,
             ))
         elif shape.shape_type == "polygon" and len(points) >= 3:
+            painter.setBrush(QColor(color.red(), color.green(), color.blue(), 45))
             painter.drawPolygon(QPolygonF(points))
         else:
             return

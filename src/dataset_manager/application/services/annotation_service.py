@@ -24,3 +24,25 @@ class AnnotationService:
         self._writer.update_shape_label(path, shape_index, label)
         return self._parser.parse(path)
 
+    def delete_shape(self, annotation_path: str, shape_index: int) -> ParseResult:
+        path = Path(annotation_path)
+        self._writer.delete_shape(path, shape_index)
+        return self._parser.parse(path)
+
+    def delete_annotation(self, annotation_path: str) -> None:
+        self._writer.delete_annotation(Path(annotation_path))
+
+    def update_rectangle_points(
+        self, annotation_path: str, shape_index: int, points: list[list[float]]
+    ) -> ParseResult:
+        path = Path(annotation_path)
+        self._writer.update_rectangle_points(path, shape_index, points)
+        return self._parser.parse(path)
+
+    def add_rectangle(
+        self, annotation_path: str, label: str, points: list[list[float]]
+    ) -> ParseResult:
+        path = Path(annotation_path)
+        self._writer.add_rectangle(path, label, points)
+        return self._parser.parse(path)
+

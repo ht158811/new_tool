@@ -6,6 +6,8 @@ from dataset_manager.application.services.project_service import ProjectService
 from dataset_manager.application.services.scan_service import ScanService
 from dataset_manager.application.services.image_service import ImageService
 from dataset_manager.application.services.annotation_service import AnnotationService
+from dataset_manager.application.services.dataset_service import DatasetService
+from dataset_manager.application.preprocessing.preprocessing_service import PreprocessingService
 from dataset_manager.infrastructure.parsers.labelme_parser import LabelMeParser
 from dataset_manager.infrastructure.paths import AppPaths
 from dataset_manager.infrastructure.scanning.labelme_scanner import LabelMeDatasetScanner
@@ -35,7 +37,12 @@ def main() -> int:
     annotation_service = AnnotationService(parser, LabelMeAnnotationStore())
     app = QApplication(sys.argv)
     app.setApplicationName("Dataset Manager")
-    window = MainWindow(service, scan_service, image_service, annotation_service)
+    dataset_service = DatasetService(repository, cache_store)
+    preprocessing_service = PreprocessingService(repository, cache_store)
+    window = MainWindow(
+        service, dataset_service, scan_service, image_service, annotation_service,
+        preprocessing_service,
+    )
     window.show()
     return app.exec()
 

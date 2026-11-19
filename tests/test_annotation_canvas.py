@@ -50,6 +50,11 @@ class AnnotationCanvasTests(unittest.TestCase):
             canvas.render(output)
             self.assertFalse(output.isNull())
             self.assertEqual(output.size(), canvas.size())
+            interior = output.toImage().pixelColor(50, 50)
+            self.assertEqual(
+                (interior.red(), interior.green(), interior.blue()),
+                (35, 40, 48),
+            )
 
             bounds = canvas._shape_bounding_rect(document.shapes[0])
             self.assertEqual((bounds.width(), bounds.height()), (70.0, 60.0))

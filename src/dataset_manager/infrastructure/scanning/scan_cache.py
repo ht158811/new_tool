@@ -4,10 +4,11 @@ from pathlib import Path
 
 from dataset_manager.application.dto.scan_result import ScanResult
 from dataset_manager.application.ports.scan_cache_reader import ScanCacheReader
+from dataset_manager.application.ports.scan_cache_manager import ScanCacheManager
 from dataset_manager.infrastructure.storage.json_store import AtomicJsonStore
 
 
-class ScanCacheStore(ScanCacheReader):
+class ScanCacheStore(ScanCacheReader, ScanCacheManager):
     """Stores immutable scan snapshots addressed by dataset ID and scan ID."""
 
     def __init__(self, cache_root: Path, json_store: AtomicJsonStore | None = None) -> None:

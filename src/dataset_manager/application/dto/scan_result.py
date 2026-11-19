@@ -40,6 +40,14 @@ class ScanResult:
     def issue_count(self) -> int:
         return len(self.issues) + sum(len(record.issues) for record in self.records)
 
+    @property
+    def valid_annotation_image_count(self) -> int:
+        return sum(
+            1
+            for record in self.records
+            if record.image_path is not None and record.annotation_valid
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 

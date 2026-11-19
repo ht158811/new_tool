@@ -105,6 +105,7 @@ class ScanService:
             image_count=result.image_count,
             annotation_count=result.annotation_count,
             paired_count=result.paired_count,
+            valid_annotation_image_count=result.valid_annotation_image_count,
             issue_count=result.issue_count,
             category_count=len(result.categories),
             categories=result.categories,

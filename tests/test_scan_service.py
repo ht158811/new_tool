@@ -13,6 +13,7 @@ from dataset_manager.application.errors import ScanAlreadyRunningError
 from dataset_manager.application.dto.scan_result import ScanResult
 from dataset_manager.application.dto.image_record import ImageFilter
 from dataset_manager.application.services.image_service import ImageService
+from dataset_manager.application.services.dataset_service import DatasetService
 from dataset_manager.domain.models.project import utc_now_iso
 from dataset_manager.application.services.project_service import ProjectService
 from dataset_manager.application.services.scan_service import ScanService
@@ -99,6 +100,7 @@ class ScanServiceTests(unittest.TestCase):
         stored = self.repository.get(self.project.id).datasets[0]
         self.assertEqual(stored.active_scan_id, result.scan_id)
         self.assertEqual(stored.scan_summary.image_count, 2)
+        self.assertEqual(stored.scan_summary.valid_annotation_image_count, 1)
         self.assertTrue(self.cache_store.path_for(stored.id, result.scan_id).is_file())
 
     def test_single_root_recursively_pairs_colocated_images_and_json(self) -> None:
@@ -174,6 +176,27 @@ class ScanServiceTests(unittest.TestCase):
         self.assertEqual([dataset.name for dataset in stored], ["camera_07", "camera_07"])
         self.assertNotEqual(stored[0].id, stored[1].id)
 
+    def test_delete_dataset_metadata_keeps_external_files(self) -> None:
+        image_path = self.images / "keep.jpg"
+        annotation_path = self.labels / "keep.json"
+        image_path.write_bytes(b"image")
+        write_label(annotation_path, "keep.jpg")
+        dataset = self.dataset("Remove metadata")
+        result = self.scan_service.add_dataset(self.project.id, dataset)
+        cache_path = self.cache_store.path_for(dataset.id, result.scan_id)
+        self.assertTrue(cache_path.exists())
+
+        deletion = DatasetService(
+            self.repository, self.cache_store
+        ).delete_dataset_management_info(self.project.id, dataset.id)
+
+        self.assertEqual(deletion.dataset.id, dataset.id)
+        self.assertIsNone(deletion.cache_cleanup_warning)
+        self.assertEqual(self.repository.get(self.project.id).datasets, [])
+        self.assertFalse(cache_path.exists())
+        self.assertTrue(image_path.exists())
+        self.assertTrue(annotation_path.exists())
+
     def test_default_pillow_probe_reads_real_image_dimensions(self) -> None:
         image_path = self.images / "real.png"
         Image.new("RGB", (23, 17), color=(20, 30, 40)).save(image_path)
@@ -220,6 +243,8 @@ class ScanServiceTests(unittest.TestCase):
 
         self.assertFalse(result.records[0].annotation_valid)
         self.assertFalse(image.annotation_valid)
+        stored = self.repository.get(self.project.id).find_dataset(dataset.id)
+        self.assertEqual(stored.scan_summary.valid_annotation_image_count, 0)
 
     def test_cancelled_first_scan_does_not_commit_dataset_or_cache(self) -> None:
         (self.images / "one.jpg").write_bytes(b"image")
