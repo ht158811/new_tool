@@ -192,7 +192,7 @@ class ImageBrowserPageTests(unittest.TestCase):
             )
             page._category.setCurrentIndex(1)
             self.assertTrue(page._add_rectangle_button.isEnabled())
-            self.assertTrue(page._delete_shape_button.isEnabled())
+            self.assertFalse(page._delete_shape_button.isEnabled())
             self.assertTrue(page._delete_json_button.isEnabled())
 
             page._move_rectangle(0, [[2.0, 2.0], [11.0, 11.0]])
@@ -205,12 +205,12 @@ class ImageBrowserPageTests(unittest.TestCase):
             self.assertEqual(added[-1]["label"], "added")
             self.assertEqual(added[-1]["shape_type"], "rectangle")
 
+            page._select_rectangle(0)
+            self.assertTrue(page._delete_shape_button.isEnabled())
             with patch.object(
-                QInputDialog, "getItem", return_value=("#1  box · rectangle", True)
-            ), patch.object(
                 QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes
             ):
-                page._delete_current_shape()
+                page._delete_shortcut.activated.emit()
             remaining = json.loads(annotation_path.read_text(encoding="utf-8"))["shapes"]
             self.assertEqual([shape["label"] for shape in remaining], ["other", "added"])
             self.assertTrue(image_path.exists())

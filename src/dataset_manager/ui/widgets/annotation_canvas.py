@@ -9,6 +9,7 @@ from dataset_manager.domain.models.labelme import LabelMeDocument, LabelMeShape
 
 class AnnotationCanvas(QWidget):
     shape_label_clicked = Signal(int, str)
+    rectangle_selected = Signal(int)
     rectangle_move_requested = Signal(int, object)
     rectangle_add_requested = Signal(object)
     zoom_changed = Signal(int)
@@ -25,10 +26,14 @@ class AnnotationCanvas(QWidget):
         self._drag_start = QPointF()
         self._drag_original_points: list[list[float]] = []
         self._preview_points: list[list[float]] | None = None
+        self._selected_shape_index = -1
+        self._resize_corner: str | None = None
         self.setMinimumSize(64, 64)
+        self.setMouseTracking(True)
 
     def set_content(self, image_path: str, document: LabelMeDocument | None) -> None:
         self._reset_drag()
+        self._selected_shape_index = -1
         self._pixmap = QPixmap(image_path)
         self._document = document
         if not self._pixmap.isNull():
@@ -40,6 +45,7 @@ class AnnotationCanvas(QWidget):
         self._reset_drag()
         self._pixmap = QPixmap()
         self._document = None
+        self._selected_shape_index = -1
         self.resize(640, 480)
         self.update()
 
@@ -50,6 +56,9 @@ class AnnotationCanvas(QWidget):
     def set_add_rectangle_mode(self, enabled: bool) -> None:
         self._reset_drag()
         self._add_rectangle_mode = enabled
+        if enabled:
+            self._selected_shape_index = -1
+            self.rectangle_selected.emit(-1)
         self.setCursor(
             Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.ArrowCursor
         )
@@ -119,6 +128,19 @@ class AnnotationCanvas(QWidget):
                     self._draw_shape(painter, preview, left, top, scale)
                 else:
                     self._draw_shape(painter, shape, left, top, scale)
+            if 0 <= self._selected_shape_index < len(self._document.shapes):
+                selected = self._document.shapes[self._selected_shape_index]
+                selected_points = (
+                    self._preview_points
+                    if self._drag_shape_index == self._selected_shape_index
+                    and self._preview_points is not None
+                    else selected.points
+                )
+                if selected.shape_type == "rectangle":
+                    self._draw_resize_handles(
+                        painter, selected_points, left, top, scale,
+                        self._label_color(selected.label),
+                    )
         if self._drag_kind == "add" and self._preview_points is not None:
             self._draw_shape(
                 painter,
@@ -160,24 +182,49 @@ class AnnotationCanvas(QWidget):
         if self._document is None:
             super().mousePressEvent(event)
             return
+        resize_corner = self._hit_resize_handle(event.position())
+        if resize_corner is not None:
+            shape = self._document.shapes[self._selected_shape_index]
+            self._drag_kind = "resize"
+            self._drag_shape_index = self._selected_shape_index
+            self._drag_start = image_point
+            self._drag_original_points = [list(point) for point in shape.points]
+            self._preview_points = [list(point) for point in shape.points]
+            self._resize_corner = resize_corner
+            self.setCursor(self._corner_cursor(resize_corner))
+            event.accept()
+            return
         for index in range(len(self._document.shapes) - 1, -1, -1):
             shape = self._document.shapes[index]
             if shape.shape_type != "rectangle":
                 continue
             bounds = self._shape_bounding_rect(shape)
             if bounds is not None and bounds.contains(image_point):
+                self._selected_shape_index = index
+                self.rectangle_selected.emit(index)
                 self._drag_kind = "move"
                 self._drag_shape_index = index
                 self._drag_start = image_point
                 self._drag_original_points = [list(point) for point in shape.points]
                 self._preview_points = [list(point) for point in shape.points]
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                self.update()
                 event.accept()
                 return
+        self._selected_shape_index = -1
+        self.rectangle_selected.emit(-1)
+        self.update()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API name
         if self._drag_kind is None:
+            if not self._add_rectangle_mode:
+                corner = self._hit_resize_handle(event.position())
+                self.setCursor(
+                    self._corner_cursor(corner)
+                    if corner is not None
+                    else Qt.CursorShape.ArrowCursor
+                )
             super().mouseMoveEvent(event)
             return
         current = self._widget_to_image(event.position(), clamp=True)
@@ -188,7 +235,7 @@ class AnnotationCanvas(QWidget):
                 [min(self._drag_start.x(), current.x()), min(self._drag_start.y(), current.y())],
                 [max(self._drag_start.x(), current.x()), max(self._drag_start.y(), current.y())],
             ]
-        else:
+        elif self._drag_kind == "move":
             dx = current.x() - self._drag_start.x()
             dy = current.y() - self._drag_start.y()
             xs = [point[0] for point in self._drag_original_points]
@@ -198,6 +245,8 @@ class AnnotationCanvas(QWidget):
             self._preview_points = [
                 [float(x + dx), float(y + dy)] for x, y in self._drag_original_points
             ]
+        else:
+            self._preview_points = self._resized_points(current)
         self.update()
         event.accept()
 
@@ -222,7 +271,7 @@ class AnnotationCanvas(QWidget):
             valid_size = max(xs) - min(xs) >= 2 and max(ys) - min(ys) >= 2
             if kind == "add" and valid_size:
                 self.rectangle_add_requested.emit(points)
-            elif kind == "move" and valid_size and points != original:
+            elif kind in {"move", "resize"} and valid_size and points != original:
                 self.rectangle_move_requested.emit(shape_index, points)
         event.accept()
 
@@ -242,6 +291,62 @@ class AnnotationCanvas(QWidget):
         self._drag_shape_index = -1
         self._drag_original_points = []
         self._preview_points = None
+        self._resize_corner = None
+
+    def _resized_points(self, current: QPointF) -> list[list[float]]:
+        xs = [float(point[0]) for point in self._drag_original_points]
+        ys = [float(point[1]) for point in self._drag_original_points]
+        left, right = min(xs), max(xs)
+        top, bottom = min(ys), max(ys)
+        corner = self._resize_corner
+        if corner in {"top_left", "bottom_left"}:
+            left = min(current.x(), right - 2.0)
+        if corner in {"top_right", "bottom_right"}:
+            right = max(current.x(), left + 2.0)
+        if corner in {"top_left", "top_right"}:
+            top = min(current.y(), bottom - 2.0)
+        if corner in {"bottom_left", "bottom_right"}:
+            bottom = max(current.y(), top + 2.0)
+        left = max(0.0, left)
+        top = max(0.0, top)
+        right = min(float(self._pixmap.width()), right)
+        bottom = min(float(self._pixmap.height()), bottom)
+        if len(self._drag_original_points) >= 4:
+            return [
+                [left, top], [right, top], [right, bottom], [left, bottom],
+            ]
+        return [[left, top], [right, bottom]]
+
+    def _hit_resize_handle(self, position: QPointF) -> str | None:
+        if (
+            self._document is None
+            or self._selected_shape_index < 0
+            or self._selected_shape_index >= len(self._document.shapes)
+        ):
+            return None
+        shape = self._document.shapes[self._selected_shape_index]
+        if shape.shape_type != "rectangle":
+            return None
+        left, top, scale, _, _ = self._target_geometry()
+        bounds = self._shape_bounding_rect(shape)
+        if bounds is None:
+            return None
+        handles = {
+            "top_left": QPointF(left + bounds.left() * scale, top + bounds.top() * scale),
+            "top_right": QPointF(left + bounds.right() * scale, top + bounds.top() * scale),
+            "bottom_right": QPointF(left + bounds.right() * scale, top + bounds.bottom() * scale),
+            "bottom_left": QPointF(left + bounds.left() * scale, top + bounds.bottom() * scale),
+        }
+        for name, center in handles.items():
+            if QRectF(center.x() - 7, center.y() - 7, 14, 14).contains(position):
+                return name
+        return None
+
+    @staticmethod
+    def _corner_cursor(corner: str | None) -> Qt.CursorShape:
+        if corner in {"top_left", "bottom_right"}:
+            return Qt.CursorShape.SizeFDiagCursor
+        return Qt.CursorShape.SizeBDiagCursor
 
     def _target_geometry(self) -> tuple[float, float, float, float, float]:
         scale = self._zoom
@@ -304,6 +409,31 @@ class AnnotationCanvas(QWidget):
         painter.fillRect(label_rect, QColor(color.red(), color.green(), color.blue(), 190))
         painter.setPen(Qt.GlobalColor.white)
         painter.drawText(label_rect.adjusted(5, 0, -3, 0), Qt.AlignmentFlag.AlignVCenter, shape.label)
+
+    @staticmethod
+    def _draw_resize_handles(
+        painter: QPainter,
+        points: list[list[float]],
+        left: float,
+        top: float,
+        scale: float,
+        color: QColor,
+    ) -> None:
+        if len(points) < 2:
+            return
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        corners = (
+            (min(xs), min(ys)), (max(xs), min(ys)),
+            (max(xs), max(ys)), (min(xs), max(ys)),
+        )
+        painter.setPen(QPen(Qt.GlobalColor.white, 1.5))
+        painter.setBrush(color)
+        for x, y in corners:
+            center_x = left + x * scale
+            center_y = top + y * scale
+            painter.drawRect(QRectF(center_x - 4, center_y - 4, 8, 8))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
 
     @staticmethod
     def _label_color(label: str) -> QColor:

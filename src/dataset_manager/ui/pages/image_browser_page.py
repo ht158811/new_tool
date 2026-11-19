@@ -4,7 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPointF, QTimer, Qt
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtGui import QBrush, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSplitter,
@@ -33,6 +33,7 @@ class ImageBrowserPage(QWidget):
         self._images: list[BrowserImage] = []
         self._current_image: BrowserImage | None = None
         self._current_document = None
+        self._selected_shape_index = -1
 
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 20, 24, 20)
@@ -69,7 +70,9 @@ class ImageBrowserPage(QWidget):
         info_layout = QVBoxLayout(self._info_panel)
         info_title = QLabel("文件与标注信息")
         info_title.setStyleSheet("font-weight: 700;")
-        self._edit_status = QLabel("单击图片中的彩色标签名可修改类别名称")
+        self._edit_status = QLabel(
+            "单击彩色标签名修改类别；拖动框内部移动，选中后拖动角点调整大小"
+        )
         self._edit_status.setWordWrap(True)
         self._edit_status.setStyleSheet("color: #7b8491;")
         self._details = FileInfoView()
@@ -108,7 +111,7 @@ class ImageBrowserPage(QWidget):
         self._add_rectangle_button.setEnabled(False)
         self._add_rectangle_button.toggled.connect(self._toggle_add_rectangle)
         action_row.addWidget(self._add_rectangle_button)
-        self._delete_shape_button = QPushButton("删除标注框…")
+        self._delete_shape_button = QPushButton("删除选中矩形框")
         self._delete_shape_button.setObjectName("deleteShapeButton")
         self._delete_shape_button.clicked.connect(self._delete_current_shape)
         self._delete_shape_button.setEnabled(False)
@@ -175,9 +178,13 @@ class ImageBrowserPage(QWidget):
 
         self._canvas = AnnotationCanvas()
         self._canvas.shape_label_clicked.connect(self._edit_shape_label)
+        self._canvas.rectangle_selected.connect(self._select_rectangle)
         self._canvas.rectangle_move_requested.connect(self._move_rectangle)
         self._canvas.rectangle_add_requested.connect(self._add_rectangle)
         self._canvas.zoom_changed.connect(lambda percent: self._zoom_label.setText(f"{percent}%"))
+        self._delete_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete), self)
+        self._delete_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._delete_shortcut.activated.connect(self._delete_current_shape)
         self._image_scroll = QScrollArea()
         self._image_scroll.setWidget(self._canvas)
         self._image_scroll.setWidgetResizable(False)
@@ -273,6 +280,7 @@ class ImageBrowserPage(QWidget):
         self._list.clear()
         self._current_image = None
         self._current_document = None
+        self._selected_shape_index = -1
         self._canvas.clear()
         self._update_delete_actions()
         self._details.setPlainText("选择图片后显示标注信息")
@@ -300,11 +308,13 @@ class ImageBrowserPage(QWidget):
         if current is None:
             self._current_image = None
             self._current_document = None
+            self._selected_shape_index = -1
             self._canvas.clear()
             self._update_delete_actions()
             return
         image = current.data(Qt.ItemDataRole.UserRole)
         self._current_image = image
+        self._selected_shape_index = -1
         result = self._annotation_service.read(image.annotation_path, image.image_path)
         document = result.document if result is not None else None
         self._current_document = document
@@ -433,24 +443,37 @@ class ImageBrowserPage(QWidget):
         self._edit_status.setStyleSheet("color: #22c55e; font-weight: 600;")
         self._preview_item(self._list.currentItem())
 
+    def _select_rectangle(self, shape_index: int) -> None:
+        document = self._current_document
+        if (
+            document is None
+            or shape_index < 0
+            or shape_index >= len(document.shapes)
+            or document.shapes[shape_index].shape_type != "rectangle"
+        ):
+            self._selected_shape_index = -1
+            self._update_delete_actions()
+            return
+        self._selected_shape_index = shape_index
+        shape = document.shapes[shape_index]
+        self._edit_status.setText(
+            f"已选中矩形框 #{shape_index + 1}：{shape.label}。"
+            "可拖动角点调整大小，按 Delete 或点击删除按钮删除。"
+        )
+        self._edit_status.setStyleSheet("color: #38bdf8; font-weight: 600;")
+        self._update_delete_actions()
+
     def _delete_current_shape(self) -> None:
         image = self._current_image
         document = self._current_document
         if image is None or image.annotation_path is None or document is None:
             return
-        if not document.shapes:
+        shape_index = self._selected_shape_index
+        if shape_index < 0 or shape_index >= len(document.shapes):
             return
-        choices = [
-            f"#{index + 1}  {shape.label} · {shape.shape_type or 'unknown'}"
-            for index, shape in enumerate(document.shapes)
-        ]
-        selected, accepted = QInputDialog.getItem(
-            self, "选择要删除的标注框", "标注：", choices, 0, False
-        )
-        if not accepted:
-            return
-        shape_index = choices.index(selected)
         shape = document.shapes[shape_index]
+        if shape.shape_type != "rectangle":
+            return
         answer = QMessageBox.question(
             self,
             "确认删除标注框",
@@ -466,6 +489,7 @@ class ImageBrowserPage(QWidget):
         except (OSError, ValueError, IndexError) as error:
             QMessageBox.critical(self, "删除标注框失败", str(error))
             return
+        self._selected_shape_index = -1
         self._edit_status.setText("标注框已删除并原子写入 JSON。刷新数据集后更新类别索引。")
         self._edit_status.setStyleSheet("color: #22c55e; font-weight: 600;")
         self._preview_item(self._list.currentItem())
@@ -513,12 +537,14 @@ class ImageBrowserPage(QWidget):
         has_json = bool(
             self._current_image is not None and self._current_image.annotation_path
         )
-        has_shapes = bool(
+        has_selected_rectangle = bool(
             has_json
             and self._current_document is not None
-            and self._current_document.shapes
+            and 0 <= self._selected_shape_index < len(self._current_document.shapes)
+            and self._current_document.shapes[self._selected_shape_index].shape_type
+            == "rectangle"
         )
-        self._delete_shape_button.setEnabled(has_shapes)
+        self._delete_shape_button.setEnabled(has_selected_rectangle)
         self._delete_json_button.setEnabled(has_json)
         can_add_rectangle = bool(
             self._current_image is not None
