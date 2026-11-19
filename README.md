@@ -20,12 +20,23 @@
 
 数据预处理还提供独立的“标签分割”：用户输入分隔符，生成前段标签和后段标签两套 LabelMe 数据。前后内容可分别启用、分别设置无分隔符标签的保留/置空/跳过规则，并分别决定是否以前段标签建立上级目录；目录分组时每份 JSON 只保留该组 shapes。图片与 JSON 同目录，源数据不修改。
 
+## 克隆后直接运行（Windows）
+
+电脑只需预先安装一次 64 位 Python 3.10–3.14，推荐 Python 3.12。克隆仓库后：
+
+1. 双击根目录的 `run.bat`。
+2. 首次运行会自动在项目内创建 `.venv` 并安装依赖，需要能够访问 Python 软件包源。
+3. 安装完成后软件自动启动；以后双击 `run.bat` 会直接复用环境。
+4. 当 `pyproject.toml` 或 `requirements-runtime.txt` 发生变化时，启动器会自动重新同步依赖。
+
+如果只想提前安装环境而不启动软件，可双击 `setup_environment.bat`。`.venv`、运行数据和缓存均已加入 Git 忽略列表，不会污染代码仓库。
+
 ## 环境
 
 - Windows 10/11
 - Python 3.10–3.14（界面使用精简的官方 PySide6 Essentials 组件）
 
-## 安装与运行
+## 手动安装与运行
 
 ```powershell
 python -m venv .venv
