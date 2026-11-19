@@ -102,6 +102,12 @@ class ImageBrowserPage(QWidget):
         valid_legend.setStyleSheet("color: #22c55e; font-weight: 600;")
         action_row.addWidget(valid_legend)
         action_row.addStretch()
+        self._add_rectangle_button = QPushButton("新增矩形框")
+        self._add_rectangle_button.setObjectName("addRectangleButton")
+        self._add_rectangle_button.setCheckable(True)
+        self._add_rectangle_button.setEnabled(False)
+        self._add_rectangle_button.toggled.connect(self._toggle_add_rectangle)
+        action_row.addWidget(self._add_rectangle_button)
         self._delete_shape_button = QPushButton("删除标注框…")
         self._delete_shape_button.setObjectName("deleteShapeButton")
         self._delete_shape_button.clicked.connect(self._delete_current_shape)
@@ -169,6 +175,8 @@ class ImageBrowserPage(QWidget):
 
         self._canvas = AnnotationCanvas()
         self._canvas.shape_label_clicked.connect(self._edit_shape_label)
+        self._canvas.rectangle_move_requested.connect(self._move_rectangle)
+        self._canvas.rectangle_add_requested.connect(self._add_rectangle)
         self._canvas.zoom_changed.connect(lambda percent: self._zoom_label.setText(f"{percent}%"))
         self._image_scroll = QScrollArea()
         self._image_scroll.setWidget(self._canvas)
@@ -322,6 +330,83 @@ class ImageBrowserPage(QWidget):
     def _toggle_overlay(self, checked: bool) -> None:
         self._canvas.set_annotations_visible(checked)
 
+    def _toggle_add_rectangle(self, checked: bool) -> None:
+        if checked and self._current_image is None:
+            self._add_rectangle_button.setChecked(False)
+            return
+        if checked and not self._overlay.isChecked():
+            self._overlay.setChecked(True)
+        self._canvas.set_add_rectangle_mode(checked)
+        self._add_rectangle_button.setText("退出新增模式" if checked else "新增矩形框")
+        if checked:
+            self._edit_status.setText("新增模式：在图片上按住左键拖动绘制矩形框。")
+            self._edit_status.setStyleSheet("color: #38bdf8; font-weight: 600;")
+
+    def _move_rectangle(self, shape_index: int, points: object) -> None:
+        image = self._current_image
+        if image is None or image.annotation_path is None or not isinstance(points, list):
+            return
+        try:
+            self._annotation_service.update_rectangle_points(
+                image.annotation_path, shape_index, points
+            )
+        except (OSError, ValueError, IndexError) as error:
+            QMessageBox.critical(self, "移动矩形框失败", str(error))
+            self._preview_item(self._list.currentItem())
+            return
+        self._edit_status.setText("矩形框坐标已原子写入 JSON。")
+        self._edit_status.setStyleSheet("color: #22c55e; font-weight: 600;")
+        self._preview_item(self._list.currentItem())
+
+    def _add_rectangle(self, points: object) -> None:
+        image = self._current_image
+        if image is None or not isinstance(points, list):
+            return
+        label, accepted = QInputDialog.getText(self, "新增矩形框", "类别名称：")
+        clean_label = label.strip()
+        if not accepted or not clean_label:
+            return
+        try:
+            if image.annotation_path is not None:
+                self._annotation_service.add_rectangle(
+                    image.annotation_path, clean_label, points
+                )
+            else:
+                if image.width is None or image.height is None:
+                    raise ValueError("缺少图片尺寸，无法创建 LabelMe JSON")
+                annotation_path = str(Path(image.image_path).with_suffix(".json"))
+                self._annotation_service.create_annotation_with_rectangle(
+                    annotation_path,
+                    image.image_path,
+                    image.width,
+                    image.height,
+                    clean_label,
+                    points,
+                )
+                updated = replace(
+                    image,
+                    annotation_path=annotation_path,
+                    categories=tuple(sorted({*image.categories, clean_label})),
+                    annotation_valid=True,
+                )
+                row = self._list.currentRow()
+                item = self._list.currentItem()
+                if 0 <= row < len(self._images):
+                    self._images[row] = updated
+                if item is not None:
+                    item.setData(Qt.ItemDataRole.UserRole, updated)
+                    item.setForeground(QBrush(QColor("#22c55e")))
+                self._current_image = updated
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(self, "新增矩形框失败", str(error))
+            self._preview_item(self._list.currentItem())
+            return
+        self._edit_status.setText(
+            "新矩形框已原子写入 JSON。刷新数据集后更新类别索引。"
+        )
+        self._edit_status.setStyleSheet("color: #22c55e; font-weight: 600;")
+        self._preview_item(self._list.currentItem())
+
     def _edit_shape_label(self, shape_index: int, current_label: str) -> None:
         image = self._current_image
         if image is None or image.annotation_path is None:
@@ -435,6 +520,13 @@ class ImageBrowserPage(QWidget):
         )
         self._delete_shape_button.setEnabled(has_shapes)
         self._delete_json_button.setEnabled(has_json)
+        can_add_rectangle = bool(
+            self._current_image is not None
+            and (not has_json or self._current_document is not None)
+        )
+        self._add_rectangle_button.setEnabled(can_add_rectangle)
+        if not can_add_rectangle and self._add_rectangle_button.isChecked():
+            self._add_rectangle_button.setChecked(False)
 
     def _reset_filters(self) -> None:
         self._filename.clear()

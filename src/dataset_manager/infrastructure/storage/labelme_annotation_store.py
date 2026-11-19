@@ -86,6 +86,40 @@ class LabelMeAnnotationStore(AnnotationWriter):
         })
         self._store.write(annotation_path, data)
 
+    def create_annotation_with_rectangle(
+        self,
+        annotation_path: Path,
+        image_name: str,
+        width: int,
+        height: int,
+        label: str,
+        points: list[list[float]],
+    ) -> None:
+        if annotation_path.exists():
+            raise FileExistsError(f"JSON 文件已存在，拒绝覆盖: {annotation_path.name}")
+        if width <= 0 or height <= 0:
+            raise ValueError("图片尺寸必须大于 0")
+        clean_label = label.strip()
+        if not clean_label:
+            raise ValueError("类别名称不能为空")
+        normalized = self._validated_rectangle_points(points)
+        self._validate_image_bounds(normalized, {"imageWidth": width, "imageHeight": height})
+        self._store.write(annotation_path, {
+            "version": "5.0.1",
+            "flags": {},
+            "shapes": [{
+                "label": clean_label,
+                "points": normalized,
+                "group_id": None,
+                "shape_type": "rectangle",
+                "flags": {},
+            }],
+            "imagePath": image_name,
+            "imageData": None,
+            "imageHeight": height,
+            "imageWidth": width,
+        })
+
     @staticmethod
     def _validated_rectangle_points(points: list[list[float]]) -> list[list[float]]:
         if len(points) not in {2, 4}:

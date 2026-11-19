@@ -9,6 +9,8 @@ from dataset_manager.domain.models.labelme import LabelMeDocument, LabelMeShape
 
 class AnnotationCanvas(QWidget):
     shape_label_clicked = Signal(int, str)
+    rectangle_move_requested = Signal(int, object)
+    rectangle_add_requested = Signal(object)
     zoom_changed = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -17,9 +19,16 @@ class AnnotationCanvas(QWidget):
         self._document: LabelMeDocument | None = None
         self._show_annotations = True
         self._zoom = 1.0
+        self._add_rectangle_mode = False
+        self._drag_kind: str | None = None
+        self._drag_shape_index = -1
+        self._drag_start = QPointF()
+        self._drag_original_points: list[list[float]] = []
+        self._preview_points: list[list[float]] | None = None
         self.setMinimumSize(64, 64)
 
     def set_content(self, image_path: str, document: LabelMeDocument | None) -> None:
+        self._reset_drag()
         self._pixmap = QPixmap(image_path)
         self._document = document
         if not self._pixmap.isNull():
@@ -28,6 +37,7 @@ class AnnotationCanvas(QWidget):
         self.update()
 
     def clear(self) -> None:
+        self._reset_drag()
         self._pixmap = QPixmap()
         self._document = None
         self.resize(640, 480)
@@ -35,6 +45,14 @@ class AnnotationCanvas(QWidget):
 
     def set_annotations_visible(self, visible: bool) -> None:
         self._show_annotations = visible
+        self.update()
+
+    def set_add_rectangle_mode(self, enabled: bool) -> None:
+        self._reset_drag()
+        self._add_rectangle_mode = enabled
+        self.setCursor(
+            Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.ArrowCursor
+        )
         self.update()
 
     def fit_to(self, viewport_size: QSize) -> None:
@@ -83,29 +101,147 @@ class AnnotationCanvas(QWidget):
         target = QRectF(left, top, target_width, target_height)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         painter.drawPixmap(target, self._pixmap, QRectF(self._pixmap.rect()))
-        if not self._show_annotations or self._document is None:
+        if not self._show_annotations:
             return
 
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        for shape in self._document.shapes:
-            self._draw_shape(painter, shape, left, top, scale)
+        if self._document is not None:
+            for index, shape in enumerate(self._document.shapes):
+                if index == self._drag_shape_index and self._preview_points is not None:
+                    preview = LabelMeShape(
+                        label=shape.label,
+                        points=self._preview_points,
+                        group_id=shape.group_id,
+                        shape_type=shape.shape_type,
+                        flags=shape.flags,
+                        extra=shape.extra,
+                    )
+                    self._draw_shape(painter, preview, left, top, scale)
+                else:
+                    self._draw_shape(painter, shape, left, top, scale)
+        if self._drag_kind == "add" and self._preview_points is not None:
+            self._draw_shape(
+                painter,
+                LabelMeShape("新矩形", self._preview_points, shape_type="rectangle"),
+                left,
+                top,
+                scale,
+            )
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API name
-        if self._document is None or self._pixmap.isNull() or not self._show_annotations:
+        if self._pixmap.isNull() or not self._show_annotations:
             super().mousePressEvent(event)
             return
         if event.button() is not Qt.MouseButton.LeftButton:
             super().mousePressEvent(event)
             return
-        left, top, scale, _, _ = self._target_geometry()
+        if not self._add_rectangle_mode and self._document is not None:
+            left, top, scale, _, _ = self._target_geometry()
+            for index in range(len(self._document.shapes) - 1, -1, -1):
+                shape = self._document.shapes[index]
+                label_rect = self._label_rect(shape, left, top, scale)
+                if label_rect is not None and label_rect.contains(event.position()):
+                    self.shape_label_clicked.emit(index, shape.label)
+                    event.accept()
+                    return
+        image_point = self._widget_to_image(event.position(), clamp=False)
+        if image_point is None:
+            super().mousePressEvent(event)
+            return
+        if self._add_rectangle_mode:
+            self._drag_kind = "add"
+            self._drag_start = image_point
+            self._preview_points = [
+                [image_point.x(), image_point.y()],
+                [image_point.x(), image_point.y()],
+            ]
+            event.accept()
+            return
+        if self._document is None:
+            super().mousePressEvent(event)
+            return
         for index in range(len(self._document.shapes) - 1, -1, -1):
             shape = self._document.shapes[index]
-            label_rect = self._label_rect(shape, left, top, scale)
-            if label_rect is not None and label_rect.contains(event.position()):
-                self.shape_label_clicked.emit(index, shape.label)
+            if shape.shape_type != "rectangle":
+                continue
+            bounds = self._shape_bounding_rect(shape)
+            if bounds is not None and bounds.contains(image_point):
+                self._drag_kind = "move"
+                self._drag_shape_index = index
+                self._drag_start = image_point
+                self._drag_original_points = [list(point) for point in shape.points]
+                self._preview_points = [list(point) for point in shape.points]
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
                 event.accept()
                 return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        if self._drag_kind is None:
+            super().mouseMoveEvent(event)
+            return
+        current = self._widget_to_image(event.position(), clamp=True)
+        if current is None:
+            return
+        if self._drag_kind == "add":
+            self._preview_points = [
+                [min(self._drag_start.x(), current.x()), min(self._drag_start.y(), current.y())],
+                [max(self._drag_start.x(), current.x()), max(self._drag_start.y(), current.y())],
+            ]
+        else:
+            dx = current.x() - self._drag_start.x()
+            dy = current.y() - self._drag_start.y()
+            xs = [point[0] for point in self._drag_original_points]
+            ys = [point[1] for point in self._drag_original_points]
+            dx = max(-min(xs), min(dx, self._pixmap.width() - max(xs)))
+            dy = max(-min(ys), min(dy, self._pixmap.height() - max(ys)))
+            self._preview_points = [
+                [float(x + dx), float(y + dy)] for x, y in self._drag_original_points
+            ]
+        self.update()
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        if event.button() is not Qt.MouseButton.LeftButton or self._drag_kind is None:
+            super().mouseReleaseEvent(event)
+            return
+        kind = self._drag_kind
+        shape_index = self._drag_shape_index
+        points = [list(point) for point in (self._preview_points or [])]
+        original = [list(point) for point in self._drag_original_points]
+        self._reset_drag()
+        self.setCursor(
+            Qt.CursorShape.CrossCursor
+            if self._add_rectangle_mode
+            else Qt.CursorShape.ArrowCursor
+        )
+        self.update()
+        if len(points) >= 2:
+            xs = [point[0] for point in points]
+            ys = [point[1] for point in points]
+            valid_size = max(xs) - min(xs) >= 2 and max(ys) - min(ys) >= 2
+            if kind == "add" and valid_size:
+                self.rectangle_add_requested.emit(points)
+            elif kind == "move" and valid_size and points != original:
+                self.rectangle_move_requested.emit(shape_index, points)
+        event.accept()
+
+    def _widget_to_image(self, position: QPointF, clamp: bool) -> QPointF | None:
+        left, top, scale, target_width, target_height = self._target_geometry()
+        x = (position.x() - left) / scale
+        y = (position.y() - top) / scale
+        if not clamp and not (0 <= x <= self._pixmap.width() and 0 <= y <= self._pixmap.height()):
+            return None
+        if clamp:
+            x = max(0.0, min(float(self._pixmap.width()), x))
+            y = max(0.0, min(float(self._pixmap.height()), y))
+        return QPointF(x, y)
+
+    def _reset_drag(self) -> None:
+        self._drag_kind = None
+        self._drag_shape_index = -1
+        self._drag_original_points = []
+        self._preview_points = None
 
     def _target_geometry(self) -> tuple[float, float, float, float, float]:
         scale = self._zoom

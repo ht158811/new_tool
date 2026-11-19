@@ -95,6 +95,69 @@ class AnnotationEditingTests(unittest.TestCase):
             self.assertFalse(annotation_path.exists())
             self.assertEqual(image_path.read_bytes(), b"image-bytes")
 
+    def test_moves_and_adds_rectangles_atomically(self) -> None:
+        original = {
+            "shapes": [{
+                "label": "old",
+                "points": [[1, 2], [30, 40]],
+                "group_id": 7,
+                "shape_type": "rectangle",
+                "flags": {"keep": True},
+                "custom": "preserved",
+            }],
+            "imagePath": "sample.jpg",
+            "imageData": None,
+            "imageWidth": 200,
+            "imageHeight": 100,
+            "rootExtra": {"keep": True},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sample.json"
+            path.write_text(json.dumps(original), encoding="utf-8")
+            service = AnnotationService(LabelMeParser(), LabelMeAnnotationStore())
+
+            service.update_rectangle_points(str(path), 0, [[11, 12], [40, 50]])
+            service.add_rectangle(str(path), "new", [[60, 20], [90, 45]])
+            updated = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(updated["shapes"][0]["points"], [[11.0, 12.0], [40.0, 50.0]])
+        self.assertEqual(updated["shapes"][0]["custom"], "preserved")
+        self.assertEqual(updated["shapes"][0]["group_id"], 7)
+        self.assertEqual(updated["shapes"][1], {
+            "label": "new",
+            "points": [[60.0, 20.0], [90.0, 45.0]],
+            "group_id": None,
+            "shape_type": "rectangle",
+            "flags": {},
+        })
+        self.assertEqual(updated["rootExtra"], {"keep": True})
+
+    def test_creates_labelme_json_for_unannotated_image_without_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "sample.jpg"
+            annotation_path = Path(directory) / "sample.json"
+            image_path.write_bytes(b"image")
+            service = AnnotationService(LabelMeParser(), LabelMeAnnotationStore())
+
+            result = service.create_annotation_with_rectangle(
+                str(annotation_path), str(image_path), 200, 100,
+                "new", [[10, 20], [80, 70]],
+            )
+            created = json.loads(annotation_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(created["imagePath"], "sample.jpg")
+            self.assertEqual(created["imageWidth"], 200)
+            self.assertEqual(created["imageHeight"], 100)
+            self.assertEqual(created["shapes"][0]["label"], "new")
+            self.assertTrue(result.is_valid)
+            before = annotation_path.read_bytes()
+            with self.assertRaises(FileExistsError):
+                service.create_annotation_with_rectangle(
+                    str(annotation_path), str(image_path), 200, 100,
+                    "other", [[1, 1], [2, 2]],
+                )
+            self.assertEqual(annotation_path.read_bytes(), before)
+
 
 if __name__ == "__main__":
     unittest.main()

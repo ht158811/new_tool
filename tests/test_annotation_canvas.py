@@ -68,6 +68,22 @@ class AnnotationCanvasTests(unittest.TestCase):
             self.assertEqual(spy.count(), 1)
             self.assertEqual(spy.at(0), [0, "box"])
 
+            move_spy = QSignalSpy(canvas.rectangle_move_requested)
+            QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+            QTest.mouseMove(canvas, QPoint(60, 60))
+            QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(60, 60))
+            self.assertEqual(move_spy.count(), 1)
+            self.assertEqual(move_spy.at(0)[0], 0)
+            self.assertEqual(move_spy.at(0)[1][0], [20.0, 20.0])
+
+            add_spy = QSignalSpy(canvas.rectangle_add_requested)
+            canvas.set_add_rectangle_mode(True)
+            QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(110, 70))
+            QTest.mouseMove(canvas, QPoint(140, 100))
+            QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(140, 100))
+            self.assertEqual(add_spy.count(), 1)
+            self.assertEqual(add_spy.at(0)[0], [[94.0, 54.0], [124.0, 84.0]])
+
             canvas.fit_to(QSize(320, 240))
             self.assertLessEqual(canvas.width(), 320)
             self.assertLessEqual(canvas.height(), 240)

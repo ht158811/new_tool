@@ -29,3 +29,15 @@ class AnnotationWriter(ABC):
     ) -> None:
         """Atomically append one LabelMe rectangle shape."""
 
+    @abstractmethod
+    def create_annotation_with_rectangle(
+        self,
+        annotation_path: Path,
+        image_name: str,
+        width: int,
+        height: int,
+        label: str,
+        points: list[list[float]],
+    ) -> None:
+        """Create a new LabelMe JSON containing one rectangle without overwriting."""
+

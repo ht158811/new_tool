@@ -191,8 +191,19 @@ class ImageBrowserPageTests(unittest.TestCase):
                 AnnotationService(LabelMeParser(), LabelMeAnnotationStore()),
             )
             page._category.setCurrentIndex(1)
+            self.assertTrue(page._add_rectangle_button.isEnabled())
             self.assertTrue(page._delete_shape_button.isEnabled())
             self.assertTrue(page._delete_json_button.isEnabled())
+
+            page._move_rectangle(0, [[2.0, 2.0], [11.0, 11.0]])
+            moved = json.loads(annotation_path.read_text(encoding="utf-8"))["shapes"]
+            self.assertEqual(moved[0]["points"], [[2.0, 2.0], [11.0, 11.0]])
+
+            with patch.object(QInputDialog, "getText", return_value=("added", True)):
+                page._add_rectangle([[3.0, 12.0], [15.0, 22.0]])
+            added = json.loads(annotation_path.read_text(encoding="utf-8"))["shapes"]
+            self.assertEqual(added[-1]["label"], "added")
+            self.assertEqual(added[-1]["shape_type"], "rectangle")
 
             with patch.object(
                 QInputDialog, "getItem", return_value=("#1  box · rectangle", True)
@@ -201,7 +212,7 @@ class ImageBrowserPageTests(unittest.TestCase):
             ):
                 page._delete_current_shape()
             remaining = json.loads(annotation_path.read_text(encoding="utf-8"))["shapes"]
-            self.assertEqual([shape["label"] for shape in remaining], ["other"])
+            self.assertEqual([shape["label"] for shape in remaining], ["other", "added"])
             self.assertTrue(image_path.exists())
 
             with patch.object(

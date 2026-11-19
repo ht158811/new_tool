@@ -46,3 +46,18 @@ class AnnotationService:
         self._writer.add_rectangle(path, label, points)
         return self._parser.parse(path)
 
+    def create_annotation_with_rectangle(
+        self,
+        annotation_path: str,
+        image_path: str,
+        width: int,
+        height: int,
+        label: str,
+        points: list[list[float]],
+    ) -> ParseResult:
+        path = Path(annotation_path)
+        self._writer.create_annotation_with_rectangle(
+            path, Path(image_path).name, width, height, label, points
+        )
+        return self._parser.parse(path, Path(image_path))
+
