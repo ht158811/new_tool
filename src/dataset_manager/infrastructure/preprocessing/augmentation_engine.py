@@ -38,7 +38,7 @@ class AugmentationEngine:
         if config.max_operations_per_output <= 0:
             raise ValueError("每个增强结果的最大组合操作数必须大于 0")
         relative = relative_output_path(record.image_path, dataset_root)
-        flat_stem = flattened_output_stem(record.image_path, dataset_root)
+        flat_stem = record.output_stem or flattened_output_stem(record.image_path, dataset_root)
         raw = load_json_copy(record.annotation_path) if record.annotation_valid and record.annotation_path else None
         stable_seed = int(hashlib.sha256(str(relative).encode("utf-8")).hexdigest()[:8], 16)
         rng = random.Random(config.random_seed + stable_seed)
@@ -68,8 +68,7 @@ class AugmentationEngine:
                         config.random_seed + stable_seed + index,
                     )
                     current_width, current_height = new_width, new_height
-                operation_name = "_".join(operations)
-                stem = f"{flat_stem}_aug_{operation_name}_{index}"
+                stem = f"{flat_stem}_a{index}"
                 image_output = output_directory / "data" / f"{stem}{relative.suffix.lower()}"
                 save_image(image, image_output)
                 generated_images += 1

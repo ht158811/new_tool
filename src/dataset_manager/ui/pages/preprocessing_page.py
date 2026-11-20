@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 
 from dataset_manager.application.preprocessing.models import (
     AugmentationConfig, ConversionConfig, ConversionTarget, CropConfig,
-    LabelSplitConfig, NoSeparatorRule, OperationType, ProcessingConfig,
+    LabelRenameConfig, LabelRetentionMode, LabelSplitConfig, OperationType, ProcessingConfig,
     ProcessingProgress, ProcessingScope,
 )
 from dataset_manager.application.preprocessing.preprocessing_service import PreprocessingService
@@ -69,7 +69,8 @@ class PreprocessingPage(QWidget):
         output_layout.addWidget(self._result_name, 1, 1, 1, 2)
         output_note = QLabel(
             "裁剪/增强：图片与同名 LabelMe JSON 平铺保存；标签分割：按前后规则输出；"
-            "格式转换：按目标格式生成目录结构。"
+            "格式转换：按目标格式生成目录结构。直接复制的图片保持字节级 100% 一致；"
+            "裁剪和增强等必须重新编码的图片使用最高质量或无损参数保存。"
         )
         output_note.setWordWrap(True)
         output_layout.addWidget(output_note, 2, 0, 1, 3)
@@ -103,7 +104,8 @@ class PreprocessingPage(QWidget):
             (OperationType.CROP, "数据裁剪", 1),
             (OperationType.AUGMENTATION, "数据增强", 2),
             (OperationType.LABEL_SPLIT, "标签分割", 3),
-            (OperationType.CONVERSION, "格式转换", 4),
+            (OperationType.LABEL_RENAME, "批量标签重命名", 4),
+            (OperationType.CONVERSION, "格式转换", 5),
         ):
             button = QPushButton(text)
             button.setCheckable(True)
@@ -121,6 +123,7 @@ class PreprocessingPage(QWidget):
         self._config_stack.addWidget(self._build_crop_panel())
         self._config_stack.addWidget(self._build_augmentation_panel())
         self._config_stack.addWidget(self._build_label_split_panel())
+        self._config_stack.addWidget(self._build_label_rename_panel())
         self._config_stack.addWidget(self._build_conversion_panel())
         config_layout.addWidget(self._config_stack)
         root.addWidget(config_box)
@@ -253,6 +256,23 @@ class PreprocessingPage(QWidget):
         form.addRow(note)
         return panel
 
+    def _build_label_rename_panel(self) -> QWidget:
+        panel = QWidget()
+        form = QFormLayout(panel)
+        self._rename_source_label = QLineEdit()
+        self._rename_source_label.setPlaceholderText("输入当前 LabelMe 标签名，例如 defect")
+        self._rename_target_label = QLineEdit()
+        self._rename_target_label.setPlaceholderText("输入修改后的标签名，例如 scratch")
+        form.addRow("要修改的标签名", self._rename_source_label)
+        form.addRow("修改后的标签名", self._rename_target_label)
+        note = QLabel(
+            "仅精确修改 LabelMe JSON 的 shapes[].label。图片和 JSON 会输出到新的 data "
+            "目录，其他字段保持不变，原始数据不会修改。"
+        )
+        note.setWordWrap(True)
+        form.addRow(note)
+        return panel
+
     def _build_label_split_panel(self) -> QWidget:
         panel = QWidget()
         layout = QGridLayout(panel)
@@ -261,41 +281,46 @@ class PreprocessingPage(QWidget):
         layout.addWidget(QLabel("标签分隔符"), 0, 0)
         layout.addWidget(self._split_separator, 0, 1, 1, 3)
 
-        layout.addWidget(QLabel("输出内容"), 1, 0)
-        layout.addWidget(QLabel("无分隔符标签"), 1, 1)
-        layout.addWidget(QLabel("按前段标签建上级目录"), 1, 2)
+        layout.addWidget(QLabel("输出数据"), 1, 0)
+        layout.addWidget(QLabel("标签保留方式"), 1, 1)
+        layout.addWidget(QLabel("按保留标签建立目录"), 1, 2)
 
-        self._split_before = QCheckBox("前段数据")
+        self._split_before = QCheckBox("生成前标签输出")
         self._split_before.setChecked(True)
-        self._split_before_rule = self._no_separator_combo()
-        self._split_before_group = QCheckBox("启用")
+        self._split_before_retention = self._retention_combo(LabelRetentionMode.BEFORE)
+        self._split_before_group = QCheckBox("目录分组")
         layout.addWidget(self._split_before, 2, 0)
-        layout.addWidget(self._split_before_rule, 2, 1)
+        layout.addWidget(self._split_before_retention, 2, 1)
         layout.addWidget(self._split_before_group, 2, 2)
 
-        self._split_after = QCheckBox("后段数据")
+        self._split_after = QCheckBox("生成后标签输出")
         self._split_after.setChecked(True)
-        self._split_after_rule = self._no_separator_combo()
-        self._split_after_group = QCheckBox("启用（参考脚本默认）")
+        self._split_after_retention = self._retention_combo(LabelRetentionMode.AFTER)
+        self._split_after_group = QCheckBox("目录分组")
         self._split_after_group.setChecked(True)
         layout.addWidget(self._split_after, 3, 0)
-        layout.addWidget(self._split_after_rule, 3, 1)
+        layout.addWidget(self._split_after_retention, 3, 1)
         layout.addWidget(self._split_after_group, 3, 2)
 
+        no_separator = QLabel("无分隔符标签：前后输出均保留原标签")
+        layout.addWidget(no_separator, 4, 0, 1, 3)
+
         note = QLabel(
-            "示例：car;damaged → 前段标签 car，后段标签 damaged。"
-            "启用目录分组时，每个目录只保留相同前段标签的 shapes，图片与 JSON 同目录。"
+            "前、后两套输出可独立配置。例如前输出选择“前标签保留”，后输出选择“后标签保留”；"
+            "也可在任一输出中选择“前后标签同时保留”，保留原始完整标签。启用目录分组后，"
+            "按该输出实际保留的标签建目录，每份 JSON 只保留该目录对应的 shapes。"
         )
         note.setWordWrap(True)
-        layout.addWidget(note, 4, 0, 1, 4)
+        layout.addWidget(note, 5, 0, 1, 3)
         return panel
 
     @staticmethod
-    def _no_separator_combo() -> QComboBox:
+    def _retention_combo(default: LabelRetentionMode) -> QComboBox:
         combo = QComboBox()
-        combo.addItem("两侧保留原标签", NoSeparatorRule.KEEP)
-        combo.addItem("标签置空", NoSeparatorRule.EMPTY)
-        combo.addItem("跳过该 shape", NoSeparatorRule.SKIP)
+        combo.addItem("前标签保留", LabelRetentionMode.BEFORE)
+        combo.addItem("后标签保留", LabelRetentionMode.AFTER)
+        combo.addItem("前后标签同时保留", LabelRetentionMode.BOTH)
+        combo.setCurrentIndex(combo.findData(default))
         return combo
 
     @staticmethod
@@ -308,10 +333,12 @@ class PreprocessingPage(QWidget):
     def _select_operation(self, operation: OperationType, index: int) -> None:
         self._operation = operation
         self._config_stack.setCurrentIndex(index)
-        label_split = operation is OperationType.LABEL_SPLIT
+        label_operation = operation in {
+            OperationType.LABEL_SPLIT, OperationType.LABEL_RENAME,
+        }
         for scope, radio in self._scope_radios.items():
-            radio.setEnabled(not label_split or scope is ProcessingScope.VALID_ANNOTATIONS)
-        if label_split:
+            radio.setEnabled(not label_operation or scope is ProcessingScope.VALID_ANNOTATIONS)
+        if label_operation:
             self._scope_radios[ProcessingScope.VALID_ANNOTATIONS].setChecked(True)
         self._update_enabled()
 
@@ -380,15 +407,24 @@ class PreprocessingPage(QWidget):
             if not separator:
                 raise ValueError("请输入标签分隔符")
             if not self._split_before.isChecked() and not self._split_after.isChecked():
-                raise ValueError("前段数据和后段数据至少选择一项")
+                raise ValueError("前标签输出和后标签输出至少选择一项")
             return ProcessingConfig(**common, label_split=LabelSplitConfig(
                 separator=separator,
                 create_before=self._split_before.isChecked(),
                 create_after=self._split_after.isChecked(),
-                before_no_separator=self._split_before_rule.currentData(),
-                after_no_separator=self._split_after_rule.currentData(),
+                before_retention=LabelRetentionMode(
+                    self._split_before_retention.currentData()
+                ),
+                after_retention=LabelRetentionMode(
+                    self._split_after_retention.currentData()
+                ),
                 before_group_by_label=self._split_before_group.isChecked(),
                 after_group_by_label=self._split_after_group.isChecked(),
+            ))
+        if self._operation is OperationType.LABEL_RENAME:
+            return ProcessingConfig(**common, label_rename=LabelRenameConfig(
+                source_label=self._rename_source_label.text(),
+                target_label=self._rename_target_label.text(),
             ))
         return ProcessingConfig(**common, conversion=ConversionConfig(
             self._conversion_target.currentData()

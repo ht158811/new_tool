@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import shutil
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from pathlib import Path
@@ -11,7 +10,9 @@ from PIL import Image
 
 from dataset_manager.application.preprocessing.models import ConversionConfig, ConversionTarget, ProcessingRecord
 from dataset_manager.domain.models.project import TaskType
-from dataset_manager.infrastructure.preprocessing.common import load_json_copy, rectangle_bounds, relative_output_path
+from dataset_manager.infrastructure.preprocessing.common import (
+    copy_image_exact, load_json_copy, rectangle_bounds, relative_output_path,
+)
 from dataset_manager.infrastructure.storage.json_store import AtomicJsonStore
 
 
@@ -50,8 +51,7 @@ class ConversionEngine:
             self._check_cancelled(is_cancelled)
             relative = relative_output_path(record.image_path, dataset_root)
             image_output = output_directory / "images" / relative
-            image_output.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(record.image_path, image_output)
+            copy_image_exact(record.image_path, image_output)
             generated_images += 1
             if not record.annotation_valid or not record.annotation_path:
                 warnings.append(f"无有效标注，仅复制图片: {Path(record.image_path).name}")
@@ -122,8 +122,7 @@ class ConversionEngine:
             self._check_cancelled(is_cancelled)
             relative = relative_output_path(record.image_path, dataset_root)
             image_output = output_directory / "images" / relative
-            image_output.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(record.image_path, image_output)
+            copy_image_exact(record.image_path, image_output)
             if not record.annotation_valid or not record.annotation_path:
                 with Image.open(record.image_path) as source:
                     width, height = source.size

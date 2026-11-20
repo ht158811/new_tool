@@ -68,6 +68,7 @@ class MainWindow(QMainWindow):
         self._home.add_dataset_requested.connect(self._add_dataset)
         self._home.refresh_dataset_requested.connect(self._refresh_dataset)
         self._home.dataset_selection_changed.connect(self._set_preprocessing_dataset)
+        self._home.dataset_order_changed.connect(self._reorder_datasets)
         self._stack.addWidget(self._home)
         self._image_browser = ImageBrowserPage(
             self._project_service, image_service, annotation_service
@@ -154,6 +155,7 @@ class MainWindow(QMainWindow):
         self._model_test.reload_sources()
 
     def _add_dataset(self, project_id: str) -> None:
+        _, insert_after_dataset_id = self._home.selected_dataset_context()
         dialog = AddDatasetDialog(self)
         if dialog.exec() != AddDatasetDialog.DialogCode.Accepted:
             return
@@ -163,7 +165,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "配置错误", str(error))
             return
 
-        worker = ScanWorker(self._scan_service, project_id, dataset=dataset, parent=self)
+        worker = ScanWorker(
+            self._scan_service,
+            project_id,
+            dataset=dataset,
+            insert_after_dataset_id=insert_after_dataset_id,
+            parent=self,
+        )
         self._start_scan(worker, f"扫描数据集：{dataset.name}", first_add=True)
 
     def _refresh_dataset(self, project_id: str, dataset_id: str) -> None:
@@ -203,7 +211,7 @@ class MainWindow(QMainWindow):
 
         def succeeded(result: object) -> None:
             progress.close()
-            self._home.refresh()
+            self._home.refresh(getattr(result, "dataset_id", None))
             self._image_browser.reload_sources()
             self._model_test.reload_sources()
             issue_count = getattr(result, "issue_count", 0)
@@ -236,6 +244,20 @@ class MainWindow(QMainWindow):
         worker.scan_cancelled.connect(cancelled)
         worker.finished.connect(cleanup)
         worker.start()
+
+    def _reorder_datasets(self, project_id: str, ordered_ids: object) -> None:
+        if not isinstance(ordered_ids, list):
+            return
+        _, selected_dataset_id = self._home.selected_dataset_context()
+        try:
+            self._dataset_service.reorder_datasets(
+                project_id, [str(dataset_id) for dataset_id in ordered_ids]
+            )
+        except (OSError, KeyError, ValueError) as error:
+            QMessageBox.warning(self, "数据集排序失败", str(error))
+            self._home.refresh(selected_dataset_id)
+        self._image_browser.reload_sources()
+        self._model_test.reload_sources()
 
     def _delete_project(self, project_id: str) -> None:
         try:

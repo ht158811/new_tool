@@ -13,8 +13,8 @@ from PIL import Image
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import (
-    QApplication, QFrame, QInputDialog, QLabel, QMessageBox, QScrollArea, QSpinBox,
-    QSplitter, QTextEdit,
+    QAbstractItemView, QApplication, QFrame, QInputDialog, QLabel, QMessageBox,
+    QScrollArea, QSpinBox, QSplitter, QTextEdit,
 )
 
 from dataset_manager.application.dto.image_record import BrowserImage
@@ -281,6 +281,29 @@ class ImageBrowserPageTests(unittest.TestCase):
         page._delete_dataset_button.click()
         self.assertEqual(project_delete.at(0), [project.id])
         self.assertEqual(dataset_delete.at(0), [project.id, dataset.id])
+        page.close()
+
+    def test_home_dataset_list_supports_internal_drag_order(self) -> None:
+        project = Project.create("P")
+        datasets = [
+            Dataset.create(name, f"D:\\{name}", f"D:\\{name}", f"D:\\{name}",
+                           TaskType.OBJECT_DETECTION)
+            for name in ("A", "B", "C")
+        ]
+        project.datasets.extend(datasets)
+        page = HomePage(lambda: [project])
+        self.assertEqual(
+            page._dataset_list.dragDropMode(),
+            QAbstractItemView.DragDropMode.InternalMove,
+        )
+        moved = page._dataset_list.takeItem(0)
+        page._dataset_list.insertItem(2, moved)
+        order_spy = QSignalSpy(page.dataset_order_changed)
+        page._persist_dataset_order()
+        self.assertEqual(
+            order_spy.at(0),
+            [project.id, [datasets[1].id, datasets[2].id, datasets[0].id]],
+        )
         page.close()
 
 

@@ -29,7 +29,7 @@ class CropEngine:
     ) -> tuple[int, int, int]:
         self._validate(config)
         relative = relative_output_path(record.image_path, dataset_root)
-        flat_stem = flattened_output_stem(record.image_path, dataset_root)
+        flat_stem = record.output_stem or flattened_output_stem(record.image_path, dataset_root)
         raw = load_json_copy(record.annotation_path) if record.annotation_valid and record.annotation_path else None
         with Image.open(record.image_path) as source_image:
             source_image.load()
@@ -45,7 +45,7 @@ class CropEngine:
                 if raw and not shapes and not config.keep_empty:
                     skipped += 1
                     continue
-                stem = f"{flat_stem}_crop_r{row + 1:02d}_c{column + 1:02d}"
+                stem = f"{flat_stem}_r{row + 1}c{column + 1}"
                 image_output = output_directory / "data" / f"{stem}{relative.suffix.lower()}"
                 cropped = source_image.crop((x, y, x + crop_width, y + crop_height))
                 save_image(cropped, image_output)

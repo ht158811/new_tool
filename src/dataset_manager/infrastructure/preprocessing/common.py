@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,40 @@ def load_json_copy(path: str) -> dict[str, Any]:
 
 def save_image(image: Image.Image, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    image.save(path)
+    suffix = path.suffix.casefold()
+    if suffix in {".jpg", ".jpeg"}:
+        image.save(path, quality=100, subsampling=0, optimize=False)
+    elif suffix == ".webp":
+        image.save(path, lossless=True, quality=100, method=6)
+    elif suffix == ".png":
+        image.save(path, compress_level=0)
+    elif suffix in {".tif", ".tiff"}:
+        image.save(path, compression="raw")
+    else:
+        image.save(path)
+
+
+def copy_image_exact(source: str | Path, destination: Path) -> None:
+    """Copy an image without decoding/re-encoding and verify byte identity."""
+    source_path = Path(source)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, destination)
+    if source_path.stat().st_size != destination.stat().st_size:
+        destination.unlink(missing_ok=True)
+        raise OSError(f"图片完整复制校验失败: {source_path.name}")
+    source_digest = _file_sha256(source_path)
+    destination_digest = _file_sha256(destination)
+    if source_digest != destination_digest:
+        destination.unlink(missing_ok=True)
+        raise OSError(f"图片完整复制校验失败: {source_path.name}")
+
+
+def _file_sha256(path: Path) -> bytes:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.digest()
 
 
 def relative_output_path(image_path: str, dataset_root: str) -> Path:

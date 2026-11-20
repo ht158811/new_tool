@@ -36,3 +36,17 @@ class DatasetService:
             except OSError as error:
                 warning = f"扫描缓存清理失败，可稍后手动清理: {error}"
         return DatasetDeletionResult(dataset, warning)
+
+    def reorder_datasets(self, project_id: str, ordered_dataset_ids: list[str]) -> None:
+        project = self._repository.get(project_id)
+        existing_ids = [dataset.id for dataset in project.datasets]
+        if (
+            len(ordered_dataset_ids) != len(existing_ids)
+            or len(set(ordered_dataset_ids)) != len(ordered_dataset_ids)
+            or set(ordered_dataset_ids) != set(existing_ids)
+        ):
+            raise ValueError("数据集排序内容与项目中的数据集不一致")
+        by_id = {dataset.id: dataset for dataset in project.datasets}
+        project.datasets = [by_id[dataset_id] for dataset_id in ordered_dataset_ids]
+        project.updated_at = utc_now_iso()
+        self._repository.save(project)

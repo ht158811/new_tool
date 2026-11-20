@@ -359,6 +359,34 @@ class ScanServiceTests(unittest.TestCase):
             thread.join(timeout=5)
         self.assertFalse(first_error)
 
+    def test_new_dataset_inserts_after_anchor_and_reorder_persists(self) -> None:
+        first = self.dataset("First")
+        second = self.dataset("Second")
+        third = self.dataset("Third")
+        self.scan_service.add_dataset(self.project.id, first)
+        self.scan_service.add_dataset(self.project.id, second)
+        self.scan_service.add_dataset(
+            self.project.id, third, insert_after_dataset_id=first.id
+        )
+        stored = self.repository.get(self.project.id)
+        self.assertEqual(
+            [dataset.id for dataset in stored.datasets],
+            [first.id, third.id, second.id],
+        )
+
+        DatasetService(self.repository, self.cache_store).reorder_datasets(
+            self.project.id, [second.id, first.id, third.id]
+        )
+        reordered = self.repository.get(self.project.id)
+        self.assertEqual(
+            [dataset.id for dataset in reordered.datasets],
+            [second.id, first.id, third.id],
+        )
+        with self.assertRaises(ValueError):
+            DatasetService(self.repository, self.cache_store).reorder_datasets(
+                self.project.id, [first.id, first.id, third.id]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,7 @@ class OperationType(str, Enum):
     CROP = "crop"
     AUGMENTATION = "augmentation"
     LABEL_SPLIT = "label_split"
+    LABEL_RENAME = "label_rename"
     CONVERSION = "conversion"
 
 
@@ -24,10 +25,10 @@ class ConversionTarget(str, Enum):
     VOC = "voc"
 
 
-class NoSeparatorRule(str, Enum):
-    KEEP = "keep"
-    EMPTY = "empty"
-    SKIP = "skip"
+class LabelRetentionMode(str, Enum):
+    BEFORE = "before"
+    AFTER = "after"
+    BOTH = "both"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,10 +87,34 @@ class LabelSplitConfig:
     separator: str = ";"
     create_before: bool = True
     create_after: bool = True
-    before_no_separator: NoSeparatorRule = NoSeparatorRule.KEEP
-    after_no_separator: NoSeparatorRule = NoSeparatorRule.KEEP
+    before_retention: LabelRetentionMode = LabelRetentionMode.BEFORE
+    after_retention: LabelRetentionMode = LabelRetentionMode.AFTER
     before_group_by_label: bool = False
     after_group_by_label: bool = True
+
+    def __post_init__(self) -> None:
+        for name in ("before_retention", "after_retention"):
+            value = getattr(self, name)
+            if not isinstance(value, LabelRetentionMode):
+                object.__setattr__(self, name, LabelRetentionMode(value))
+
+
+@dataclass(frozen=True, slots=True)
+class LabelRenameConfig:
+    source_label: str
+    target_label: str
+
+    def __post_init__(self) -> None:
+        source = self.source_label.strip()
+        target = self.target_label.strip()
+        if not source:
+            raise ValueError("要修改的标签名不能为空")
+        if not target:
+            raise ValueError("修改后的标签名不能为空")
+        if source == target:
+            raise ValueError("修改前后的标签名不能相同")
+        object.__setattr__(self, "source_label", source)
+        object.__setattr__(self, "target_label", target)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,10 +128,14 @@ class ProcessingConfig:
     crop: CropConfig | None = None
     augmentation: AugmentationConfig | None = None
     label_split: LabelSplitConfig | None = None
+    label_rename: LabelRenameConfig | None = None
     conversion: ConversionConfig | None = None
 
     def parameters(self) -> dict[str, Any]:
-        selected = self.crop or self.augmentation or self.label_split or self.conversion
+        selected = (
+            self.crop or self.augmentation or self.label_split
+            or self.label_rename or self.conversion
+        )
         if selected is None:
             return {}
         data = asdict(selected)
@@ -119,6 +148,7 @@ class ProcessingRecord:
     annotation_path: str | None
     annotation_valid: bool
     issues: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    output_stem: str | None = None
 
     @property
     def has_json(self) -> bool:

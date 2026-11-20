@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -12,7 +13,7 @@ from dataset_manager.application.ports.project_repository import ProjectReposito
 from dataset_manager.application.ports.scan_cache_reader import ScanCacheReader
 from dataset_manager.application.preprocessing.models import (
     OperationType, ProcessingConfig, ProcessingProgress, ProcessingResult,
-    ProcessingScope, ScopePreview,
+    ProcessingRecord, ProcessingScope, ScopePreview,
 )
 from dataset_manager.application.preprocessing.processing_scope import (
     build_preview, records_from_cache, select_records,
@@ -21,6 +22,7 @@ from dataset_manager.infrastructure.preprocessing.augmentation_engine import Aug
 from dataset_manager.infrastructure.preprocessing.conversion_engine import ConversionEngine
 from dataset_manager.infrastructure.preprocessing.crop_engine import CropEngine
 from dataset_manager.infrastructure.preprocessing.label_split_engine import LabelSplitEngine
+from dataset_manager.infrastructure.preprocessing.label_rename_engine import LabelRenameEngine
 from dataset_manager.infrastructure.storage.json_store import AtomicJsonStore
 
 ProgressCallback = Callable[[ProcessingProgress], None]
@@ -36,6 +38,7 @@ class PreprocessingService:
         augmentation_engine: AugmentationEngine | None = None,
         conversion_engine: ConversionEngine | None = None,
         label_split_engine: LabelSplitEngine | None = None,
+        label_rename_engine: LabelRenameEngine | None = None,
         json_store: AtomicJsonStore | None = None,
     ) -> None:
         self._repository = repository
@@ -44,6 +47,7 @@ class PreprocessingService:
         self._augmentation = augmentation_engine or AugmentationEngine()
         self._conversion = conversion_engine or ConversionEngine()
         self._label_split = label_split_engine or LabelSplitEngine()
+        self._label_rename = label_rename_engine or LabelRenameEngine()
         self._json_store = json_store or AtomicJsonStore()
 
     def preview(
@@ -62,11 +66,11 @@ class PreprocessingService:
     ) -> ProcessingResult:
         project, dataset, records = self._context(config.project_id, config.dataset_id)
         if (
-            config.operation is OperationType.LABEL_SPLIT
+            config.operation in {OperationType.LABEL_SPLIT, OperationType.LABEL_RENAME}
             and config.scope is not ProcessingScope.VALID_ANNOTATIONS
         ):
-            raise ValueError("标签分割仅支持具有有效 LabelMe JSON 的图片")
-        selected = select_records(records, config.scope)
+            raise ValueError("标签处理仅支持具有有效 LabelMe JSON 的图片")
+        selected = self._assign_output_stems(select_records(records, config.scope))
         if not config.output_root.strip():
             raise ValueError("必须指定输出目录")
         output_root = self._validate_output(Path(config.output_root), Path(dataset.root_path))
@@ -156,6 +160,12 @@ class PreprocessingService:
                     generated_images, generated_json, extra_skipped = self._label_split.process(
                         record, dataset.root_path, temporary, config.label_split, cancelled
                     )
+                elif config.operation is OperationType.LABEL_RENAME:
+                    if config.label_rename is None:
+                        raise ValueError("缺少批量标签重命名配置")
+                    generated_images, generated_json, extra_skipped = self._label_rename.process(
+                        record, dataset.root_path, temporary, config.label_rename, cancelled
+                    )
                 else:
                     raise ValueError(f"未知处理类型: {config.operation}")
                 result.succeeded += 1
@@ -208,6 +218,39 @@ class PreprocessingService:
         self._emit(progress, len(selected), len(selected), result, "格式转换", "处理中")
 
     @staticmethod
+    def _assign_output_stems(records: list[ProcessingRecord]) -> list[ProcessingRecord]:
+        """Preserve source names and add only a short numeric suffix on collisions."""
+        groups: dict[str, list[ProcessingRecord]] = {}
+        for record in records:
+            base = Path(record.image_path).stem[:180]
+            groups.setdefault(base.casefold(), []).append(record)
+        reserved = set(groups)
+        used: set[str] = set()
+        names: dict[str, str] = {}
+        for group in groups.values():
+            ordered = sorted(
+                group, key=lambda item: str(Path(item.image_path).resolve()).casefold()
+            )
+            base = Path(ordered[0].image_path).stem[:180]
+            for index, record in enumerate(ordered):
+                candidate = base
+                if index:
+                    suffix = 2
+                    candidate = f"{base}_{suffix}"
+                    while candidate.casefold() in reserved or candidate.casefold() in used:
+                        suffix += 1
+                        candidate = f"{base}_{suffix}"
+                used.add(candidate.casefold())
+                names[str(Path(record.image_path).resolve()).casefold()] = candidate
+        return [
+            replace(
+                record,
+                output_stem=names[str(Path(record.image_path).resolve()).casefold()],
+            )
+            for record in records
+        ]
+
+    @staticmethod
     def _validate_output(output_root: Path, source_root: Path) -> Path:
         if not str(output_root).strip():
             raise ValueError("必须指定输出目录")
@@ -229,6 +272,7 @@ class PreprocessingService:
             OperationType.CROP: "Crop",
             OperationType.AUGMENTATION: "Augmentation",
             OperationType.LABEL_SPLIT: "LabelSplit",
+            OperationType.LABEL_RENAME: "LabelRename",
             OperationType.CONVERSION: "Conversion",
         }[operation]
         date = datetime.now().strftime("%Y%m%d")

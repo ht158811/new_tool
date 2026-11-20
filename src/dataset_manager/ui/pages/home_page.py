@@ -5,8 +5,8 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton,
-    QVBoxLayout, QWidget,
+    QAbstractItemView, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QPushButton, QVBoxLayout, QWidget,
 )
 
 from dataset_manager.domain.models.project import Project
@@ -19,10 +19,13 @@ class HomePage(QWidget):
     add_dataset_requested = Signal(str)
     refresh_dataset_requested = Signal(str, str)
     dataset_selection_changed = Signal(str, str)
+    dataset_order_changed = Signal(str, object)
 
     def __init__(self, project_loader: Callable[[], list[Project]]) -> None:
         super().__init__()
         self._project_loader = project_loader
+        self._preferred_dataset_id: str | None = None
+        self._populating_datasets = False
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 24)
         root.setSpacing(18)
@@ -65,6 +68,12 @@ class HomePage(QWidget):
         self._list.currentItemChanged.connect(self._update_action_buttons)
         self._dataset_list = QListWidget()
         self._dataset_list.setAlternatingRowColors(True)
+        self._dataset_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self._dataset_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self._dataset_list.setDragEnabled(True)
+        self._dataset_list.setAcceptDrops(True)
+        self._dataset_list.setDropIndicatorShown(True)
+        self._dataset_list.model().rowsMoved.connect(self._persist_dataset_order)
         self._dataset_list.currentItemChanged.connect(self._update_action_buttons)
         self._dataset_list.currentItemChanged.connect(self._emit_dataset_selection_changed)
         self._delete_project_button = QPushButton("删除选中项目的管理信息")
@@ -105,8 +114,11 @@ class HomePage(QWidget):
         layout.addWidget(QLabel(caption))
         return card
 
-    def refresh(self) -> None:
+    def refresh(self, preferred_dataset_id: str | None = None) -> None:
         selected_project_id = self._selected_project_id()
+        if preferred_dataset_id is None:
+            _, preferred_dataset_id = self.selected_dataset_context()
+        self._preferred_dataset_id = preferred_dataset_id
         projects = self._project_loader()
         self._list.clear()
         self._dataset_list.clear()
@@ -181,22 +193,51 @@ class HomePage(QWidget):
             )
 
     def _show_project_datasets(self, current: QListWidgetItem | None) -> None:
-        self._dataset_list.clear()
-        if current is None:
+        self._populating_datasets = True
+        try:
+            self._dataset_list.clear()
+            if current is None:
+                return
+            project = current.data(Qt.ItemDataRole.UserRole + 1)
+            preferred_item = None
+            for dataset in project.datasets:
+                summary = dataset.scan_summary
+                item = QListWidgetItem(
+                    f"{dataset.name}    ·    {summary.image_count} 张图片    ·    "
+                    f"{summary.valid_annotation_image_count} 张有效标注    ·    "
+                    f"{summary.category_count} 个类别    ·    {summary.issue_count} 个异常项\n"
+                    f"{Path(dataset.root_path)}"
+                )
+                item.setData(Qt.ItemDataRole.UserRole, dataset.id)
+                self._dataset_list.addItem(item)
+                if dataset.id == self._preferred_dataset_id:
+                    preferred_item = item
+            if preferred_item is not None:
+                self._dataset_list.setCurrentItem(preferred_item)
+            elif self._dataset_list.count():
+                self._dataset_list.setCurrentRow(0)
+        finally:
+            self._preferred_dataset_id = None
+            self._populating_datasets = False
+
+    def _persist_dataset_order(self, *args) -> None:
+        del args
+        if self._populating_datasets:
             return
-        project = current.data(Qt.ItemDataRole.UserRole + 1)
-        for dataset in project.datasets:
-            summary = dataset.scan_summary
-            item = QListWidgetItem(
-                f"{dataset.name}    ·    {summary.image_count} 张图片    ·    "
-                f"{summary.valid_annotation_image_count} 张有效标注    ·    "
-                f"{summary.category_count} 个类别    ·    {summary.issue_count} 个异常项\n"
-                f"{Path(dataset.root_path)}"
-            )
-            item.setData(Qt.ItemDataRole.UserRole, dataset.id)
-            self._dataset_list.addItem(item)
-        if self._dataset_list.count():
-            self._dataset_list.setCurrentRow(0)
+        project_id = self._selected_project_id()
+        if not project_id:
+            return
+        ordered_ids = [
+            str(self._dataset_list.item(row).data(Qt.ItemDataRole.UserRole))
+            for row in range(self._dataset_list.count())
+        ]
+        project_item = self._list.currentItem()
+        if project_item is not None:
+            project = project_item.data(Qt.ItemDataRole.UserRole + 1)
+            by_id = {dataset.id: dataset for dataset in project.datasets}
+            if set(by_id) == set(ordered_ids):
+                project.datasets = [by_id[dataset_id] for dataset_id in ordered_ids]
+        self.dataset_order_changed.emit(project_id, ordered_ids)
 
     def _selected_project_id(self) -> str | None:
         item = self._list.currentItem()

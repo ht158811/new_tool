@@ -30,11 +30,14 @@ class ScanService:
         dataset: Dataset,
         progress: Callable[[ScanProgress], None] | None = None,
         is_cancelled: Callable[[], bool] | None = None,
+        insert_after_dataset_id: str | None = None,
     ) -> ScanResult:
         self._repository.get(project_id)
         return self._execute(
             dataset,
-            lambda result: self._commit_new_dataset(project_id, dataset, result),
+            lambda result: self._commit_new_dataset(
+                project_id, dataset, result, insert_after_dataset_id
+            ),
             progress,
             is_cancelled,
         )
@@ -79,10 +82,22 @@ class ScanService:
         finally:
             self._release(dataset.id)
 
-    def _commit_new_dataset(self, project_id: str, dataset: Dataset, result: ScanResult) -> None:
+    def _commit_new_dataset(
+        self,
+        project_id: str,
+        dataset: Dataset,
+        result: ScanResult,
+        insert_after_dataset_id: str | None = None,
+    ) -> None:
         project = self._repository.get(project_id)
         self._apply_result(dataset, result)
-        project.datasets.append(dataset)
+        insert_at = len(project.datasets)
+        if insert_after_dataset_id:
+            for index, existing in enumerate(project.datasets):
+                if existing.id == insert_after_dataset_id:
+                    insert_at = index + 1
+                    break
+        project.datasets.insert(insert_at, dataset)
         project.updated_at = utc_now_iso()
         self._repository.save(project)
 

@@ -11,8 +11,8 @@ from PIL import Image
 
 from dataset_manager.application.preprocessing.models import (
     AugmentationConfig, ConversionConfig, ConversionTarget, CropConfig,
-    LabelSplitConfig, NoSeparatorRule, OperationType, ProcessingConfig,
-    ProcessingScope,
+    LabelRenameConfig, LabelRetentionMode, LabelSplitConfig, OperationType, ProcessingConfig,
+    ProcessingRecord, ProcessingScope,
 )
 from dataset_manager.application.preprocessing.preprocessing_service import PreprocessingService
 from dataset_manager.application.services.project_service import ProjectService
@@ -124,8 +124,9 @@ class PreprocessingTests(unittest.TestCase):
         self.assertEqual(len(labels), len(images))
         self.assertTrue(all(path.parent == output / "data" for path in labels + images))
         self.assertEqual({path.stem for path in labels}, {path.stem for path in images})
-        first = json.loads(next(path for path in labels if "r01_c01" in path.name).read_text())
-        first_label_path = next(path for path in labels if "r01_c01" in path.name)
+        first = json.loads(next(path for path in labels if "r1c1" in path.name).read_text())
+        first_label_path = next(path for path in labels if "r1c1" in path.name)
+        self.assertEqual(first_label_path.name, "valid_r1c1.json")
         self.assertEqual(first["imagePath"], first_label_path.with_suffix(".jpg").name)
         rectangle = first["shapes"][0]
         self.assertEqual(rectangle["points"], [[20.0, 10.0], [50, 10.0], [50, 40], [20.0, 40]])
@@ -172,10 +173,10 @@ class PreprocessingTests(unittest.TestCase):
             crop=CropConfig(rows=2, columns=2, keep_empty=True),
         ))
         labels = Path(result.output_directory) / "data"
-        top_left = json.loads(next(labels.rglob("*r01_c01.json")).read_text())
+        top_left = json.loads(next(labels.rglob("*r1c1.json")).read_text())
         self.assertEqual(top_left["shapes"][0]["points"], [[10.0, 10.0], [50, 30.0]])
         self.assertEqual(top_left["shapes"][1]["points"], [[10.0, 10.0]])
-        bottom_right = json.loads(next(labels.rglob("*r02_c02.json")).read_text())
+        bottom_right = json.loads(next(labels.rglob("*r2c2.json")).read_text())
         line = next(shape for shape in bottom_right["shapes"] if shape["label"] == "trace")
         self.assertEqual(line["points"], [[0.0, 0.0], [40.0, 30.0]])
 
@@ -193,6 +194,11 @@ class PreprocessingTests(unittest.TestCase):
             augmentation=AugmentationConfig(brightness=1.2, outputs_per_image=1),
         ))
         bright_label = json.loads(next((Path(brightness.output_directory) / "data").glob("*.json")).read_text())
+        bright_image = next((Path(brightness.output_directory) / "data").glob("*.jpg"))
+        self.assertEqual(bright_image.name, "valid_a1.jpg")
+        with Image.open(bright_image) as saved:
+            self.assertTrue(saved.quantization)
+            self.assertLessEqual(max(max(table) for table in saved.quantization.values()), 2)
         original = json.loads(self.valid_json.read_text())
         self.assertEqual(bright_label["shapes"], original["shapes"])
         self.assertNotEqual(horizontal.output_directory, brightness.output_directory)
@@ -240,6 +246,17 @@ class PreprocessingTests(unittest.TestCase):
         self.assertNotIn("/", first)
         self.assertNotIn("\\", first)
 
+        records = [
+            ProcessingRecord(str(self.source / "line_b" / "same.jpg"), None, False),
+            ProcessingRecord(str(self.source / "line_a" / "same.jpg"), None, False),
+            ProcessingRecord(str(self.source / "unique.jpg"), None, False),
+        ]
+        assigned = self.service._assign_output_stems(records)
+        stems = {Path(record.image_path).parent.name: record.output_stem for record in assigned}
+        self.assertEqual(stems["line_a"], "same")
+        self.assertEqual(stems["line_b"], "same_2")
+        self.assertEqual(stems[self.source.name], "unique")
+
     def test_label_split_uses_separate_before_after_rules_and_label_folders(self) -> None:
         raw = json.loads(self.valid_json.read_text())
         raw["shapes"] = [
@@ -264,8 +281,8 @@ class PreprocessingTests(unittest.TestCase):
                 separator=";",
                 create_before=True,
                 create_after=True,
-                before_no_separator=NoSeparatorRule.KEEP,
-                after_no_separator=NoSeparatorRule.SKIP,
+                before_retention=LabelRetentionMode.BEFORE,
+                after_retention=LabelRetentionMode.AFTER,
                 before_group_by_label=False,
                 after_group_by_label=True,
             ),
@@ -273,26 +290,120 @@ class PreprocessingTests(unittest.TestCase):
         output = Path(result.output_directory)
         before_labels = list((output / "before").glob("*.json"))
         self.assertEqual(len(before_labels), 1)
-        before_data = json.loads(before_labels[0].read_text())
-        self.assertEqual(
-            [shape["label"] for shape in before_data["shapes"]],
-            ["car", "car", "board"],
+        before_values = sorted(
+            shape["label"] for shape in json.loads(before_labels[0].read_text())["shapes"]
         )
+        self.assertEqual(before_values, ["board", "car", "car"])
         after_labels = list((output / "after").glob("*/*.json"))
-        self.assertEqual(len(after_labels), 1)
-        after_data = json.loads(after_labels[0].read_text())
+        self.assertEqual(len(after_labels), 3)
+        after_values = []
+        for label_path in after_labels:
+            after_data = json.loads(label_path.read_text())
+            after_values.extend(shape["label"] for shape in after_data["shapes"])
+            paired_image = label_path.with_suffix(self.valid_image.suffix)
+            self.assertTrue(paired_image.is_file())
+            self.assertEqual(after_data["imagePath"], paired_image.name)
+            self.assertEqual(digest(paired_image), before_image)
+            self.assertEqual(paired_image.name, "valid_post.jpg")
+        self.assertEqual(sorted(after_values), ["board", "damaged", "dirty"])
         self.assertEqual(
-            [shape["label"] for shape in after_data["shapes"]],
-            ["damaged", "dirty"],
+            {path.parent.name for path in after_labels},
+            {"board", "damaged", "dirty"},
         )
-        paired_image = after_labels[0].with_suffix(self.valid_image.suffix)
-        self.assertTrue(paired_image.is_file())
-        self.assertEqual(after_data["imagePath"], paired_image.name)
         self.assertEqual(digest(self.valid_image), before_image)
         self.assertEqual(digest(self.valid_json), before_json)
         manifest = json.loads((output / "result_manifest.json").read_text())
         self.assertEqual(manifest["operation"], "label_split")
         self.assertEqual(manifest["parameters"]["separator"], ";")
+        self.assertEqual(manifest["parameters"]["before_retention"], "before")
+        self.assertEqual(manifest["parameters"]["after_retention"], "after")
+
+    def test_label_split_outputs_have_independent_retention_modes(self) -> None:
+        self.assertIs(
+            LabelSplitConfig(before_retention="both").before_retention,
+            LabelRetentionMode.BOTH,
+        )
+        raw = json.loads(self.valid_json.read_text())
+        raw["shapes"] = [{
+            "label": "car;damaged", "points": [[1, 1], [20, 20]],
+            "shape_type": "rectangle", "flags": {},
+        }]
+        self.valid_json.write_text(json.dumps(raw), encoding="utf-8")
+
+        before = self.service.execute(self.config(
+            OperationType.LABEL_SPLIT,
+            label_split=LabelSplitConfig(
+                separator=";",
+                create_before=True,
+                create_after=False,
+                before_retention=LabelRetentionMode.BOTH,
+                before_group_by_label=True,
+            ),
+        ))
+        before_root = Path(before.output_directory)
+        self.assertTrue((before_root / "before").is_dir())
+        self.assertFalse((before_root / "after").exists())
+        before_json = next((before_root / "before").glob("*/*.json"))
+        self.assertEqual(before_json.parent.name, "car;damaged")
+        self.assertEqual(
+            json.loads(before_json.read_text())["shapes"][0]["label"],
+            "car;damaged",
+        )
+
+        after = self.service.execute(self.config(
+            OperationType.LABEL_SPLIT,
+            label_split=LabelSplitConfig(
+                separator=";",
+                create_before=False,
+                create_after=True,
+                after_retention=LabelRetentionMode.BEFORE,
+                after_group_by_label=True,
+            ),
+        ))
+        after_root = Path(after.output_directory)
+        self.assertFalse((after_root / "before").exists())
+        self.assertTrue((after_root / "after").is_dir())
+        after_json = next((after_root / "after").glob("*/*.json"))
+        self.assertEqual(
+            json.loads(after_json.read_text())["shapes"][0]["label"], "car"
+        )
+        self.assertEqual(after_json.parent.name, "car")
+
+        self.assertEqual(
+            self.service._label_split._safe_folder_name('a/b:c?d'),
+            "a_b_c_d",
+        )
+
+    def test_batch_label_rename_preserves_labelme_and_source_files(self) -> None:
+        before_image = digest(self.valid_image)
+        before_json = digest(self.valid_json)
+        result = self.service.execute(self.config(
+            OperationType.LABEL_RENAME,
+            label_rename=LabelRenameConfig("defect", "scratch"),
+        ))
+        output = Path(result.output_directory)
+        output_image = output / "data" / "valid.jpg"
+        output_json = output / "data" / "valid.json"
+        data = json.loads(output_json.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [shape["label"] for shape in data["shapes"]],
+            ["scratch", "region"],
+        )
+        self.assertEqual(data["shapes"][0]["custom"], "preserved")
+        self.assertEqual(data["rootExtra"], {"keep": True})
+        self.assertEqual(data["imagePath"], "valid.jpg")
+        self.assertIsNone(data["imageData"])
+        self.assertEqual(digest(output_image), before_image)
+        self.assertEqual(digest(self.valid_image), before_image)
+        self.assertEqual(digest(self.valid_json), before_json)
+        manifest = json.loads((output / "result_manifest.json").read_text())
+        self.assertEqual(manifest["operation"], "label_rename")
+        self.assertEqual(manifest["parameters"], {
+            "source_label": "defect", "target_label": "scratch",
+        })
+
+        with self.assertRaises(ValueError):
+            LabelRenameConfig("defect", " defect ")
 
     def test_yolo_conversion_is_parseable_and_does_not_overwrite(self) -> None:
         raw = json.loads(self.valid_json.read_text())
@@ -310,6 +421,10 @@ class PreprocessingTests(unittest.TestCase):
         self.assertEqual(len(values), 5)
         self.assertTrue(all(0 <= float(value) <= 1 for value in values[1:]))
         self.assertTrue((Path(first.output_directory) / "result_manifest.json").is_file())
+        self.assertEqual(
+            digest(Path(first.output_directory) / "images" / self.valid_image.name),
+            digest(self.valid_image),
+        )
 
         custom = ProcessingConfig(
             self.project_id, self.dataset_id, str(self.output),

@@ -22,6 +22,7 @@ class ScanWorker(QThread):
         project_id: str,
         dataset: Dataset | None = None,
         dataset_id: str | None = None,
+        insert_after_dataset_id: str | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -29,6 +30,7 @@ class ScanWorker(QThread):
         self._project_id = project_id
         self._dataset = dataset
         self._dataset_id = dataset_id
+        self._insert_after_dataset_id = insert_after_dataset_id
         self._cancel_event = threading.Event()
 
     def request_cancel(self) -> None:
@@ -42,6 +44,7 @@ class ScanWorker(QThread):
                     self._dataset,
                     progress=self._on_progress,
                     is_cancelled=self._cancel_event.is_set,
+                    insert_after_dataset_id=self._insert_after_dataset_id,
                 )
             elif self._dataset_id is not None:
                 result = self._scan_service.refresh_dataset(
