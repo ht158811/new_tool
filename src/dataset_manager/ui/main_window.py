@@ -13,10 +13,12 @@ from dataset_manager.application.services.scan_service import ScanService
 from dataset_manager.application.services.image_service import ImageService
 from dataset_manager.application.services.annotation_service import AnnotationService
 from dataset_manager.application.preprocessing.preprocessing_service import PreprocessingService
+from dataset_manager.application.model_testing.service import ModelTestService
 from dataset_manager.ui.dialogs.add_dataset_dialog import AddDatasetDialog
 from dataset_manager.ui.pages.home_page import HomePage
 from dataset_manager.ui.pages.image_browser_page import ImageBrowserPage
 from dataset_manager.ui.pages.preprocessing_page import PreprocessingPage
+from dataset_manager.ui.pages.model_test_page import ModelTestPage
 from dataset_manager.ui.themes import Theme, stylesheet
 from dataset_manager.ui.workers.scan_worker import ScanWorker
 
@@ -30,6 +32,7 @@ class MainWindow(QMainWindow):
         image_service: ImageService,
         annotation_service: AnnotationService,
         preprocessing_service: PreprocessingService,
+        model_test_service: ModelTestService,
     ) -> None:
         super().__init__()
         self._project_service = project_service
@@ -74,10 +77,12 @@ class MainWindow(QMainWindow):
             self._project_service, preprocessing_service
         )
         self._stack.addWidget(self._preprocessing)
+        self._model_test = ModelTestPage(self._project_service, model_test_service)
+        self._stack.addWidget(self._model_test)
 
         button_group = QButtonGroup(self)
         button_group.setExclusive(True)
-        for index, name in enumerate(("项目首页", "图片浏览", "数据预处理", "数据统计", "系统设置")):
+        for index, name in enumerate(("项目首页", "图片浏览", "数据预处理", "模型测试", "系统设置")):
             button = QPushButton(name)
             button.setCheckable(True)
             button_group.addButton(button)
@@ -89,6 +94,8 @@ class MainWindow(QMainWindow):
                 button.clicked.connect(lambda checked=False: self._stack.setCurrentIndex(1))
             elif index == 2:
                 button.clicked.connect(self._open_preprocessing)
+            elif index == 3:
+                button.clicked.connect(self._open_model_test)
             else:
                 page = self._placeholder(name)
                 self._stack.addWidget(page)
@@ -127,6 +134,12 @@ class MainWindow(QMainWindow):
         self._preprocessing.set_dataset(project_id, dataset_id)
         self._stack.setCurrentIndex(2)
 
+    def _open_model_test(self, checked: bool = False) -> None:
+        del checked
+        project_id, dataset_id = self._home.selected_dataset_context()
+        self._model_test.set_dataset(project_id, dataset_id)
+        self._stack.setCurrentIndex(3)
+
     def _create_project(self) -> None:
         name, accepted = QInputDialog.getText(self, "创建项目", "项目名称：")
         if not accepted:
@@ -138,6 +151,7 @@ class MainWindow(QMainWindow):
             return
         self._home.refresh()
         self._image_browser.reload_sources()
+        self._model_test.reload_sources()
 
     def _add_dataset(self, project_id: str) -> None:
         dialog = AddDatasetDialog(self)
@@ -191,6 +205,7 @@ class MainWindow(QMainWindow):
             progress.close()
             self._home.refresh()
             self._image_browser.reload_sources()
+            self._model_test.reload_sources()
             issue_count = getattr(result, "issue_count", 0)
             QMessageBox.information(
                 self,
@@ -248,6 +263,7 @@ class MainWindow(QMainWindow):
             return
         self._home.refresh()
         self._image_browser.reload_sources()
+        self._model_test.reload_sources()
         QMessageBox.information(
             self,
             "删除完成",
@@ -288,6 +304,7 @@ class MainWindow(QMainWindow):
             return
         self._home.refresh()
         self._image_browser.reload_sources()
+        self._model_test.reload_sources()
         message = f"数据集“{dataset.name}”的管理信息已删除。\n外部数据文件未修改。"
         if result.cache_cleanup_warning:
             message += f"\n\n{result.cache_cleanup_warning}"
@@ -295,6 +312,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API name
         self._preprocessing.shutdown()
+        self._model_test.shutdown()
         for worker in tuple(self._scan_workers):
             worker.request_cancel()
             worker.wait(3000)

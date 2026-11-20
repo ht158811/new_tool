@@ -11,7 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PIL import Image
 from PySide6.QtCore import Qt
-from PySide6.QtTest import QSignalSpy
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import (
     QApplication, QFrame, QInputDialog, QLabel, QMessageBox, QScrollArea, QSpinBox,
     QSplitter, QTextEdit,
@@ -44,6 +44,7 @@ class _ImageService:
         self.annotation_path = annotation_path
         self.list_calls = 0
         self.last_category: str | None = None
+        self.last_valid_annotations_only = False
 
     def categories(self, project_id: str, dataset_id: str) -> list[str]:
         return ["scratch", "dent"]
@@ -51,6 +52,7 @@ class _ImageService:
     def list_images(self, project_id: str, dataset_id: str, query) -> list[BrowserImage]:
         self.list_calls += 1
         self.last_category = query.category
+        self.last_valid_annotations_only = query.valid_annotations_only
         return [
             BrowserImage(
                 path, self.annotation_path, 32, 24, ("scratch",), 0,
@@ -91,7 +93,7 @@ class ImageBrowserPageTests(unittest.TestCase):
             self.assertEqual(page._result_label.text(), "请选择类别")
             self.assertEqual(image_service.list_calls, 0)
             self.assertEqual(page._category.currentText(), "请选择类别")
-            self.assertEqual(page._category.itemText(1), "全部类别")
+            self.assertEqual(page._category.itemText(1), "全部有效 JSON")
             self.assertIsNotNone(page.findChild(QScrollArea))
             self.assertIsInstance(page._details, QTextEdit)
             self.assertEqual(page._details.lineWrapMode(), QTextEdit.LineWrapMode.NoWrap)
@@ -117,12 +119,14 @@ class ImageBrowserPageTests(unittest.TestCase):
 
             self.assertEqual(image_service.list_calls, 1)
             self.assertEqual(image_service.last_category, "")
+            self.assertTrue(image_service.last_valid_annotations_only)
             self.assertEqual(page._list.count(), 1)
             self.assertEqual(page._list.item(0).text(), "sample.jpg")
             self.assertTrue(page._list.item(0).icon().isNull())
 
             page._category.setCurrentIndex(2)
             self.assertEqual(image_service.last_category, "scratch")
+            self.assertFalse(image_service.last_valid_annotations_only)
             page.close()
 
     def test_previous_and_next_buttons_browse_filtered_images(self) -> None:
@@ -144,17 +148,28 @@ class ImageBrowserPageTests(unittest.TestCase):
 
             page._category.setCurrentIndex(1)
             self.assertEqual(page._list.currentRow(), 0)
-            self.assertEqual(page._position_label.text(), "1 / 3")
+            self.assertEqual(page._position_label.text(), "当前图片：1 / 3")
             self.assertFalse(page._previous_button.isEnabled())
             self.assertTrue(page._next_button.isEnabled())
 
             page._next_button.click()
             self.assertEqual(page._list.currentRow(), 1)
-            self.assertEqual(page._position_label.text(), "2 / 3")
-            page._next_button.click()
+            self.assertEqual(page._position_label.text(), "当前图片：2 / 3")
+            page._next_shortcut.activated.emit()
             self.assertEqual(page._list.currentRow(), 2)
             self.assertFalse(page._next_button.isEnabled())
-            page._previous_button.click()
+            page._previous_shortcut.activated.emit()
+            self.assertEqual(page._list.currentRow(), 1)
+
+        with patch.object(QApplication, "focusWidget", return_value=page._filename):
+            page._next_shortcut.activated.emit()
+            self.assertEqual(page._list.currentRow(), 1)
+            page.show()
+            page._filename.setFocus()
+            QApplication.processEvents()
+            self.assertFalse(page._next_shortcut.isEnabled())
+            QTest.keyClicks(page._filename, "adqer")
+            self.assertEqual(page._filename.text(), "adqer")
             self.assertEqual(page._list.currentRow(), 1)
             page.close()
 
@@ -210,15 +225,25 @@ class ImageBrowserPageTests(unittest.TestCase):
             with patch.object(
                 QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes
             ):
-                page._delete_shortcut.activated.emit()
+                page._delete_shape_shortcut.activated.emit()
             remaining = json.loads(annotation_path.read_text(encoding="utf-8"))["shapes"]
             self.assertEqual([shape["label"] for shape in remaining], ["other", "added"])
             self.assertTrue(image_path.exists())
 
+            page._show_boxes.setChecked(False)
+            self.assertFalse(page._canvas._show_shape_boxes)
+            page._show_labels.setChecked(False)
+            self.assertFalse(page._canvas._show_labels)
+            page._show_boxes.setChecked(True)
+            page._add_rectangle_shortcut.activated.emit()
+            self.assertTrue(page._add_rectangle_button.isChecked())
+            page._add_rectangle_shortcut.activated.emit()
+            self.assertFalse(page._add_rectangle_button.isChecked())
+
             with patch.object(
                 QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes
             ):
-                page._delete_current_annotation()
+                page._delete_json_shortcut.activated.emit()
             self.assertFalse(annotation_path.exists())
             self.assertTrue(image_path.exists())
             self.assertFalse(page._delete_shape_button.isEnabled())

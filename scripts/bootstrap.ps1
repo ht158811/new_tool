@@ -13,7 +13,7 @@ $stateFile = Join-Path $venvRoot ".dataset-manager-dependencies"
 
 function Test-SupportedPython([string]$PythonPath) {
     try {
-        $supported = & $PythonPath -c "import sys; print(int((3, 10) <= sys.version_info[:2] < (3, 15)))" 2>$null
+        $supported = & $PythonPath -c "import sys; print(int((3, 10) <= sys.version_info[:2] < (3, 14)))" 2>$null
         return $LASTEXITCODE -eq 0 -and $supported.Trim() -eq "1"
     }
     catch {
@@ -25,7 +25,7 @@ function Find-BasePython {
     $candidates = [System.Collections.Generic.List[string]]::new()
     $pyLauncher = Get-Command "py.exe" -ErrorAction SilentlyContinue
     if ($null -ne $pyLauncher) {
-        foreach ($version in @("3.12", "3.13", "3.14", "3.11", "3.10")) {
+        foreach ($version in @("3.12", "3.13", "3.11", "3.10")) {
             try {
                 $path = & $pyLauncher.Source "-$version" -c "import sys; print(sys.executable)" 2>$null
                 if ($LASTEXITCODE -eq 0 -and $path) {
@@ -56,7 +56,7 @@ function Find-BasePython {
             return $candidate
         }
     }
-    throw "Python 3.10-3.14 was not found. Install 64-bit Python 3.12 with Add Python to PATH enabled."
+    throw "Python 3.10-3.13 was not found. Install 64-bit Python 3.12 with Add Python to PATH enabled."
 }
 
 function Invoke-Python([string]$PythonPath, [string[]]$Arguments) {
@@ -66,9 +66,22 @@ function Invoke-Python([string]$PythonPath, [string[]]$Arguments) {
     }
 }
 
+function Get-FileSha256([string]$Path) {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $bytes = $sha256.ComputeHash($stream)
+        return ([System.BitConverter]::ToString($bytes)).Replace("-", "")
+    }
+    finally {
+        $stream.Dispose()
+        $sha256.Dispose()
+    }
+}
+
 function Get-DependencyState {
-    $requirementsHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $requirements).Hash
-    $projectHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $projectFile).Hash
+    $requirementsHash = Get-FileSha256 $requirements
+    $projectHash = Get-FileSha256 $projectFile
     return "$requirementsHash`n$projectHash"
 }
 

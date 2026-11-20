@@ -6,8 +6,8 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QPointF, QTimer, Qt
 from PySide6.QtGui import QBrush, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSplitter,
+    QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSplitter,
     QVBoxLayout, QWidget, QInputDialog,
 )
 
@@ -86,7 +86,7 @@ class ImageBrowserPage(QWidget):
         self._filename.setPlaceholderText("按文件名筛选")
         self._category = QComboBox()
         self._category.addItem("请选择类别", None)
-        self._category.addItem("全部类别", "")
+        self._category.addItem("全部有效 JSON", "")
         self._category.currentIndexChanged.connect(self._category_selected)
         apply_button = QPushButton("应用筛选")
         apply_button.clicked.connect(self.refresh_images)
@@ -105,26 +105,30 @@ class ImageBrowserPage(QWidget):
         valid_legend.setStyleSheet("color: #22c55e; font-weight: 600;")
         action_row.addWidget(valid_legend)
         action_row.addStretch()
-        self._add_rectangle_button = QPushButton("新增矩形框")
+        self._add_rectangle_button = QPushButton("新增矩形框 (R)")
         self._add_rectangle_button.setObjectName("addRectangleButton")
         self._add_rectangle_button.setCheckable(True)
         self._add_rectangle_button.setEnabled(False)
         self._add_rectangle_button.toggled.connect(self._toggle_add_rectangle)
         action_row.addWidget(self._add_rectangle_button)
-        self._delete_shape_button = QPushButton("删除选中矩形框")
+        self._delete_shape_button = QPushButton("删除选中矩形框 (Q)")
         self._delete_shape_button.setObjectName("deleteShapeButton")
         self._delete_shape_button.clicked.connect(self._delete_current_shape)
         self._delete_shape_button.setEnabled(False)
         action_row.addWidget(self._delete_shape_button)
-        self._delete_json_button = QPushButton("删除 JSON…")
+        self._delete_json_button = QPushButton("删除 JSON… (E)")
         self._delete_json_button.setObjectName("deleteAnnotationButton")
         self._delete_json_button.clicked.connect(self._delete_current_annotation)
         self._delete_json_button.setEnabled(False)
         action_row.addWidget(self._delete_json_button)
-        self._overlay = QCheckBox("显示标注")
-        self._overlay.setChecked(True)
-        self._overlay.toggled.connect(self._toggle_overlay)
-        action_row.addWidget(self._overlay)
+        self._show_boxes = QCheckBox("显示标签框")
+        self._show_boxes.setChecked(True)
+        self._show_boxes.toggled.connect(self._canvas_boxes_visible)
+        action_row.addWidget(self._show_boxes)
+        self._show_labels = QCheckBox("显示标签名")
+        self._show_labels.setChecked(True)
+        self._show_labels.toggled.connect(self._canvas_labels_visible)
+        action_row.addWidget(self._show_labels)
         root.addLayout(action_row)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -150,13 +154,15 @@ class ImageBrowserPage(QWidget):
         image_layout = QVBoxLayout(image_column)
         image_layout.setContentsMargins(0, 0, 0, 0)
         zoom_row = QHBoxLayout()
-        self._previous_button = QPushButton("← 上一张")
+        self._previous_button = QPushButton("← 上一张 (A)")
         self._previous_button.setObjectName("previousImageButton")
+        self._previous_button.setToolTip("快捷键：A")
         self._previous_button.clicked.connect(lambda: self._navigate_image(-1))
-        self._next_button = QPushButton("下一张 →")
+        self._next_button = QPushButton("下一张 (D) →")
         self._next_button.setObjectName("nextImageButton")
+        self._next_button.setToolTip("快捷键：D")
         self._next_button.clicked.connect(lambda: self._navigate_image(1))
-        self._position_label = QLabel("0 / 0")
+        self._position_label = QLabel("当前图片：0 / 0")
         fit_button = QPushButton("适应窗口")
         fit_button.clicked.connect(self._fit_image)
         zoom_out_button = QPushButton("－")
@@ -185,6 +191,26 @@ class ImageBrowserPage(QWidget):
         self._delete_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete), self)
         self._delete_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._delete_shortcut.activated.connect(self._delete_current_shape)
+        self._previous_shortcut = QShortcut(QKeySequence(Qt.Key.Key_A), self)
+        self._previous_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._previous_shortcut.activated.connect(lambda: self._navigate_by_shortcut(-1))
+        self._next_shortcut = QShortcut(QKeySequence(Qt.Key.Key_D), self)
+        self._next_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._next_shortcut.activated.connect(lambda: self._navigate_by_shortcut(1))
+        self._delete_shape_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Q), self)
+        self._delete_shape_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._delete_shape_shortcut.activated.connect(self._delete_shape_by_shortcut)
+        self._delete_json_shortcut = QShortcut(QKeySequence(Qt.Key.Key_E), self)
+        self._delete_json_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._delete_json_shortcut.activated.connect(self._delete_json_by_shortcut)
+        self._add_rectangle_shortcut = QShortcut(QKeySequence(Qt.Key.Key_R), self)
+        self._add_rectangle_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._add_rectangle_shortcut.activated.connect(self._toggle_add_by_shortcut)
+        self._letter_shortcuts = (
+            self._previous_shortcut, self._next_shortcut, self._delete_shape_shortcut,
+            self._delete_json_shortcut, self._add_rectangle_shortcut,
+        )
+        self._filename.installEventFilter(self)
         self._image_scroll = QScrollArea()
         self._image_scroll.setWidget(self._canvas)
         self._image_scroll.setWidgetResizable(False)
@@ -227,6 +253,7 @@ class ImageBrowserPage(QWidget):
         query = ImageFilter(
             filename=self._filename.text().strip(),
             category=category,
+            valid_annotations_only=self._category.currentIndex() == 1,
         )
         try:
             self._images = self._image_service.list_images(project_id, dataset_id, query)
@@ -262,7 +289,7 @@ class ImageBrowserPage(QWidget):
         self._category.blockSignals(True)
         self._category.clear()
         self._category.addItem("请选择类别", None)
-        self._category.addItem("全部类别", "")
+        self._category.addItem("全部有效 JSON", "")
         project_id = self._project_combo.currentData()
         dataset_id = self._dataset_combo.currentData()
         if project_id and dataset_id:
@@ -337,17 +364,24 @@ class ImageBrowserPage(QWidget):
         )
         self._update_delete_actions()
 
-    def _toggle_overlay(self, checked: bool) -> None:
-        self._canvas.set_annotations_visible(checked)
+    def _canvas_boxes_visible(self, checked: bool) -> None:
+        self._canvas.set_shape_boxes_visible(checked)
+        if not checked:
+            self._select_rectangle(-1)
+
+    def _canvas_labels_visible(self, checked: bool) -> None:
+        self._canvas.set_labels_visible(checked)
 
     def _toggle_add_rectangle(self, checked: bool) -> None:
         if checked and self._current_image is None:
             self._add_rectangle_button.setChecked(False)
             return
-        if checked and not self._overlay.isChecked():
-            self._overlay.setChecked(True)
+        if checked and not self._show_boxes.isChecked():
+            self._show_boxes.setChecked(True)
         self._canvas.set_add_rectangle_mode(checked)
-        self._add_rectangle_button.setText("退出新增模式" if checked else "新增矩形框")
+        self._add_rectangle_button.setText(
+            "退出新增模式 (R)" if checked else "新增矩形框 (R)"
+        )
         if checked:
             self._edit_status.setText("新增模式：在图片上按住左键拖动绘制矩形框。")
             self._edit_status.setStyleSheet("color: #38bdf8; font-weight: 600;")
@@ -580,13 +614,36 @@ class ImageBrowserPage(QWidget):
             self._list.scrollToItem(self._list.item(target))
         self._update_navigation()
 
+    def _navigate_by_shortcut(self, offset: int) -> None:
+        if self._text_input_has_focus():
+            return
+        self._navigate_image(offset)
+
+    @staticmethod
+    def _text_input_has_focus() -> bool:
+        return isinstance(QApplication.focusWidget(), QLineEdit)
+
+    def _delete_shape_by_shortcut(self) -> None:
+        if not self._text_input_has_focus() and self._delete_shape_button.isEnabled():
+            self._delete_current_shape()
+
+    def _delete_json_by_shortcut(self) -> None:
+        if not self._text_input_has_focus() and self._delete_json_button.isEnabled():
+            self._delete_current_annotation()
+
+    def _toggle_add_by_shortcut(self) -> None:
+        if not self._text_input_has_focus() and self._add_rectangle_button.isEnabled():
+            self._add_rectangle_button.toggle()
+
     def _update_navigation(self) -> None:
         count = self._list.count()
         row = self._list.currentRow()
         has_current = 0 <= row < count
         self._previous_button.setEnabled(has_current and row > 0)
         self._next_button.setEnabled(has_current and row < count - 1)
-        self._position_label.setText(f"{row + 1 if has_current else 0} / {count}")
+        self._position_label.setText(
+            f"当前图片：{row + 1 if has_current else 0} / {count}"
+        )
 
     def _fit_image(self) -> None:
         self._canvas.fit_to(self._image_scroll.viewport().size())
@@ -625,6 +682,12 @@ class ImageBrowserPage(QWidget):
         QTimer.singleShot(0, restore_anchor)
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API name
+        if watched is self._filename and event.type() in {
+            QEvent.Type.FocusIn, QEvent.Type.FocusOut,
+        }:
+            enabled = event.type() == QEvent.Type.FocusOut
+            for shortcut in self._letter_shortcuts:
+                shortcut.setEnabled(enabled)
         if (
             watched is self._image_scroll.viewport()
             and event.type() == QEvent.Type.Wheel

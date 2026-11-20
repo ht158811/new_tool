@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 class ImageFilter:
     filename: str = ""
     category: str = ""
+    valid_annotations_only: bool = False
     min_width: int = 0
     max_width: int = 0
     min_height: int = 0

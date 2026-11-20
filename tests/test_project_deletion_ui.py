@@ -16,6 +16,7 @@ from dataset_manager.application.services.image_service import ImageService
 from dataset_manager.application.services.project_service import ProjectService
 from dataset_manager.application.services.scan_service import ScanService
 from dataset_manager.application.preprocessing.preprocessing_service import PreprocessingService
+from dataset_manager.application.model_testing.service import ModelTestService
 from dataset_manager.infrastructure.parsers.labelme_parser import LabelMeParser
 from dataset_manager.infrastructure.scanning.labelme_scanner import LabelMeDatasetScanner
 from dataset_manager.infrastructure.scanning.scan_cache import ScanCacheStore
@@ -44,6 +45,7 @@ class ProjectDeletionUiTests(unittest.TestCase):
                 ImageService(repository, cache),
                 AnnotationService(parser, LabelMeAnnotationStore()),
                 PreprocessingService(repository, cache),
+                ModelTestService(repository, cache, object()),
             )
             self.assertTrue(window._home._delete_button.isEnabled())
 

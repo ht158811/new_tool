@@ -210,6 +210,7 @@ class ScanServiceTests(unittest.TestCase):
     def test_image_service_filters_by_name_category_and_dimensions(self) -> None:
         (self.images / "scratch_a.jpg").write_bytes(b"image")
         (self.images / "dent_b.jpg").write_bytes(b"image")
+        (self.images / "without_json.jpg").write_bytes(b"image")
         write_label(self.labels / "scratch_a.json", "scratch_a.jpg", "scratch")
         write_label(self.labels / "dent_b.json", "dent_b.jpg", "dent")
         dataset = self.dataset("Filters")
@@ -225,11 +226,18 @@ class ScanServiceTests(unittest.TestCase):
         by_dimensions = service.list_images(
             self.project.id, dataset.id, ImageFilter(min_width=11)
         )
+        valid_annotations = service.list_images(
+            self.project.id, dataset.id, ImageFilter(valid_annotations_only=True)
+        )
 
         self.assertEqual(Path(by_name[0].image_path).name, "dent_b.jpg")
         self.assertEqual(Path(by_category[0].image_path).name, "scratch_a.jpg")
         self.assertEqual(by_dimensions, [])
         self.assertTrue(by_name[0].annotation_valid)
+        self.assertEqual(
+            {Path(image.image_path).name for image in valid_annotations},
+            {"scratch_a.jpg", "dent_b.jpg"},
+        )
 
     def test_malformed_paired_json_is_not_marked_valid(self) -> None:
         (self.images / "bad.jpg").write_bytes(b"image")

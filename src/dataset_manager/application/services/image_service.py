@@ -68,6 +68,8 @@ class ImageService:
             return False
         if query.category and query.category not in image.categories:
             return False
+        if query.valid_annotations_only and not image.annotation_valid:
+            return False
         if query.min_width and (image.width is None or image.width < query.min_width):
             return False
         if query.max_width and (image.width is None or image.width > query.max_width):

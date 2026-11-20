@@ -19,6 +19,8 @@ class AnnotationCanvas(QWidget):
         self._pixmap = QPixmap()
         self._document: LabelMeDocument | None = None
         self._show_annotations = True
+        self._show_shape_boxes = True
+        self._show_labels = True
         self._zoom = 1.0
         self._add_rectangle_mode = False
         self._drag_kind: str | None = None
@@ -51,6 +53,14 @@ class AnnotationCanvas(QWidget):
 
     def set_annotations_visible(self, visible: bool) -> None:
         self._show_annotations = visible
+        self.update()
+
+    def set_shape_boxes_visible(self, visible: bool) -> None:
+        self._show_shape_boxes = visible
+        self.update()
+
+    def set_labels_visible(self, visible: bool) -> None:
+        self._show_labels = visible
         self.update()
 
     def set_add_rectangle_mode(self, enabled: bool) -> None:
@@ -128,7 +138,10 @@ class AnnotationCanvas(QWidget):
                     self._draw_shape(painter, preview, left, top, scale)
                 else:
                     self._draw_shape(painter, shape, left, top, scale)
-            if 0 <= self._selected_shape_index < len(self._document.shapes):
+            if (
+                self._show_shape_boxes
+                and 0 <= self._selected_shape_index < len(self._document.shapes)
+            ):
                 selected = self._document.shapes[self._selected_shape_index]
                 selected_points = (
                     self._preview_points
@@ -157,7 +170,11 @@ class AnnotationCanvas(QWidget):
         if event.button() is not Qt.MouseButton.LeftButton:
             super().mousePressEvent(event)
             return
-        if not self._add_rectangle_mode and self._document is not None:
+        if (
+            self._show_labels
+            and not self._add_rectangle_mode
+            and self._document is not None
+        ):
             left, top, scale, _, _ = self._target_geometry()
             for index in range(len(self._document.shapes) - 1, -1, -1):
                 shape = self._document.shapes[index]
@@ -193,6 +210,11 @@ class AnnotationCanvas(QWidget):
             self._resize_corner = resize_corner
             self.setCursor(self._corner_cursor(resize_corner))
             event.accept()
+            return
+        if not self._show_shape_boxes:
+            self._selected_shape_index = -1
+            self.rectangle_selected.emit(-1)
+            super().mousePressEvent(event)
             return
         for index in range(len(self._document.shapes) - 1, -1, -1):
             shape = self._document.shapes[index]
@@ -319,6 +341,8 @@ class AnnotationCanvas(QWidget):
 
     def _hit_resize_handle(self, position: QPointF) -> str | None:
         if (
+            not self._show_shape_boxes
+            or
             self._document is None
             or self._selected_shape_index < 0
             or self._selected_shape_index >= len(self._document.shapes)
@@ -382,24 +406,31 @@ class AnnotationCanvas(QWidget):
         if shape.shape_type not in {"rectangle", "polygon"} or not shape.points:
             return
         color = self._label_color(shape.label)
-        pen = QPen(color, 2.0)
-        painter.setPen(pen)
         points = [QPointF(left + x * scale, top + y * scale) for x, y in shape.points]
-        if shape.shape_type == "rectangle" and len(points) >= 2:
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            bounds = self._shape_bounding_rect(shape)
-            if bounds is None:
-                return
-            painter.drawRect(QRectF(
-                left + bounds.left() * scale,
-                top + bounds.top() * scale,
-                bounds.width() * scale,
-                bounds.height() * scale,
-            ))
-        elif shape.shape_type == "polygon" and len(points) >= 3:
-            painter.setBrush(QColor(color.red(), color.green(), color.blue(), 45))
-            painter.drawPolygon(QPolygonF(points))
-        else:
+        supported = (
+            shape.shape_type == "rectangle" and len(points) >= 2
+        ) or (
+            shape.shape_type == "polygon" and len(points) >= 3
+        )
+        if not supported:
+            return
+        if self._show_shape_boxes:
+            painter.setPen(QPen(color, 2.0))
+            if shape.shape_type == "rectangle":
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                bounds = self._shape_bounding_rect(shape)
+                if bounds is None:
+                    return
+                painter.drawRect(QRectF(
+                    left + bounds.left() * scale,
+                    top + bounds.top() * scale,
+                    bounds.width() * scale,
+                    bounds.height() * scale,
+                ))
+            else:
+                painter.setBrush(QColor(color.red(), color.green(), color.blue(), 45))
+                painter.drawPolygon(QPolygonF(points))
+        if not self._show_labels:
             return
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setFont(QFont(painter.font().family(), 9, QFont.Weight.DemiBold))
