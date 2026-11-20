@@ -70,7 +70,13 @@ class PreprocessingService:
             and config.scope is not ProcessingScope.VALID_ANNOTATIONS
         ):
             raise ValueError("标签处理仅支持具有有效 LabelMe JSON 的图片")
-        selected = self._assign_output_stems(select_records(records, config.scope))
+        selected_records = select_records(records, config.scope)
+        cancelled = is_cancelled or (lambda: False)
+        if config.operation is OperationType.LABEL_RENAME:
+            return self._execute_label_rename_in_place(
+                config, dataset, records, selected_records, progress, cancelled
+            )
+        selected = self._assign_output_stems(selected_records)
         if not config.output_root.strip():
             raise ValueError("必须指定输出目录")
         output_root = self._validate_output(Path(config.output_root), Path(dataset.root_path))
@@ -79,7 +85,6 @@ class PreprocessingService:
         )
         temporary = output_root / f".{final_directory.name}.{uuid4().hex}.tmp"
         temporary.mkdir(parents=False, exist_ok=False)
-        cancelled = is_cancelled or (lambda: False)
         result = ProcessingResult(
             output_directory=str(final_directory),
             input_images=len(records),
@@ -160,12 +165,6 @@ class PreprocessingService:
                     generated_images, generated_json, extra_skipped = self._label_split.process(
                         record, dataset.root_path, temporary, config.label_split, cancelled
                     )
-                elif config.operation is OperationType.LABEL_RENAME:
-                    if config.label_rename is None:
-                        raise ValueError("缺少批量标签重命名配置")
-                    generated_images, generated_json, extra_skipped = self._label_rename.process(
-                        record, dataset.root_path, temporary, config.label_rename, cancelled
-                    )
                 else:
                     raise ValueError(f"未知处理类型: {config.operation}")
                 result.succeeded += 1
@@ -216,6 +215,41 @@ class PreprocessingService:
         result.succeeded = len(selected)
         result.warnings.extend(warnings)
         self._emit(progress, len(selected), len(selected), result, "格式转换", "处理中")
+
+    def _execute_label_rename_in_place(
+        self, config, dataset, records, selected, progress, cancelled
+    ) -> ProcessingResult:
+        if config.label_rename is None:
+            raise ValueError("缺少批量标签重命名配置")
+        result = ProcessingResult(
+            output_directory=dataset.root_path,
+            input_images=len(records),
+            selected_images=len(selected),
+            skipped=len(records) - len(selected),
+        )
+
+        def validated(processed: int, current: str) -> None:
+            self._emit(progress, len(selected), processed, result, current, "校验 JSON")
+
+        try:
+            modified_files, modified_shapes = self._label_rename.rename_in_place(
+                selected, config.label_rename, cancelled, validated
+            )
+        except InterruptedError:
+            result.cancelled = True
+            return result
+        result.succeeded = len(selected)
+        result.generated_annotations = modified_files
+        result.modified_shapes = modified_shapes
+        if modified_shapes == 0:
+            result.warnings.append(
+                f"没有找到精确标签：{config.label_rename.source_label}"
+            )
+        self._emit(
+            progress, len(selected), len(selected), result,
+            f"修改 {modified_shapes} 个 shape", "原数据写入完成",
+        )
+        return result
 
     @staticmethod
     def _assign_output_stems(records: list[ProcessingRecord]) -> list[ProcessingRecord]:

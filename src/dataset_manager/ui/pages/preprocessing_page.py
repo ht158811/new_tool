@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QProgressBar, QPushButton, QRadioButton, QScrollArea, QSpinBox, QStackedWidget,
-    QVBoxLayout, QWidget,
+    QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox,
+    QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QProgressBar,
+    QPushButton, QRadioButton, QScrollArea, QSpinBox, QStackedWidget, QVBoxLayout,
+    QWidget,
 )
 
 from dataset_manager.application.preprocessing.models import (
@@ -53,16 +54,16 @@ class PreprocessingPage(QWidget):
         dataset_grid.addWidget(self._dataset_info, 0, 0)
         root.addWidget(dataset_box)
 
-        output_box = QGroupBox("输出目录（强制）")
-        output_layout = QGridLayout(output_box)
+        self._output_box = QGroupBox("输出目录（强制）")
+        output_layout = QGridLayout(self._output_box)
         self._output = QLineEdit()
         self._output.setPlaceholderText("必须选择原始数据集之外的输出目录")
         self._output.textChanged.connect(self._update_enabled)
-        browse = QPushButton("浏览…")
-        browse.clicked.connect(self._browse_output)
+        self._output_browse = QPushButton("浏览…")
+        self._output_browse.clicked.connect(self._browse_output)
         output_layout.addWidget(QLabel("输出根目录"), 0, 0)
         output_layout.addWidget(self._output, 0, 1)
-        output_layout.addWidget(browse, 0, 2)
+        output_layout.addWidget(self._output_browse, 0, 2)
         self._result_name = QLineEdit()
         self._result_name.setPlaceholderText("可选；留空时自动生成带日期和序号的目录名")
         output_layout.addWidget(QLabel("结果目录名"), 1, 0)
@@ -74,7 +75,7 @@ class PreprocessingPage(QWidget):
         )
         output_note.setWordWrap(True)
         output_layout.addWidget(output_note, 2, 0, 1, 3)
-        root.addWidget(output_box)
+        root.addWidget(self._output_box)
 
         scope_box = QGroupBox("处理范围")
         scope_layout = QVBoxLayout(scope_box)
@@ -97,9 +98,17 @@ class PreprocessingPage(QWidget):
         root.addWidget(scope_box)
 
         operation_box = QGroupBox("选择处理功能（仅执行当前选择）")
-        operation_layout = QHBoxLayout(operation_box)
-        self._operation_group = QButtonGroup(self)
-        self._operation_group.setExclusive(True)
+        operation_layout = QVBoxLayout(operation_box)
+        operation_note = QLabel("单击选择功能；按住功能项可拖动调整显示顺序。")
+        operation_note.setStyleSheet("color: #7b8491;")
+        operation_layout.addWidget(operation_note)
+        self._operation_list = QListWidget()
+        self._operation_list.setFlow(QListWidget.Flow.LeftToRight)
+        self._operation_list.setWrapping(False)
+        self._operation_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self._operation_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self._operation_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._operation_list.setFixedHeight(54)
         for operation, text, index in (
             (OperationType.CROP, "数据裁剪", 1),
             (OperationType.AUGMENTATION, "数据增强", 2),
@@ -107,11 +116,14 @@ class PreprocessingPage(QWidget):
             (OperationType.LABEL_RENAME, "批量标签重命名", 4),
             (OperationType.CONVERSION, "格式转换", 5),
         ):
-            button = QPushButton(text)
-            button.setCheckable(True)
-            button.clicked.connect(lambda checked=False, op=operation, i=index: self._select_operation(op, i))
-            self._operation_group.addButton(button)
-            operation_layout.addWidget(button)
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, operation.value)
+            item.setData(Qt.ItemDataRole.UserRole + 1, index)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item.setSizeHint(item.sizeHint().expandedTo(QLabel(text).sizeHint() + QSize(30, 18)))
+            self._operation_list.addItem(item)
+        self._operation_list.currentItemChanged.connect(self._operation_item_selected)
+        operation_layout.addWidget(self._operation_list)
         root.addWidget(operation_box)
 
         config_box = QGroupBox("当前处理配置")
@@ -330,9 +342,31 @@ class PreprocessingPage(QWidget):
         spin.setValue(value)
         return spin
 
+    def _operation_item_selected(
+        self, current: QListWidgetItem | None, previous: QListWidgetItem | None
+    ) -> None:
+        del previous
+        if current is None:
+            return
+        operation = OperationType(current.data(Qt.ItemDataRole.UserRole))
+        index = int(current.data(Qt.ItemDataRole.UserRole + 1))
+        self._select_operation(operation, index)
+
     def _select_operation(self, operation: OperationType, index: int) -> None:
         self._operation = operation
         self._config_stack.setCurrentIndex(index)
+        in_place = operation is OperationType.LABEL_RENAME
+        self._output_box.setTitle(
+            "输出目录（批量标签重命名直接修改原 JSON，无需填写）"
+            if in_place else "输出目录（强制）"
+        )
+        self._output.setEnabled(not in_place)
+        self._output_browse.setEnabled(not in_place)
+        self._result_name.setEnabled(not in_place)
+        self._output.setPlaceholderText(
+            "批量标签重命名直接操作原数据"
+            if in_place else "必须选择原始数据集之外的输出目录"
+        )
         label_operation = operation in {
             OperationType.LABEL_SPLIT, OperationType.LABEL_RENAME,
         }
@@ -437,13 +471,35 @@ class PreprocessingPage(QWidget):
         except (OSError, KeyError, ValueError) as error:
             QMessageBox.warning(self, "无法开始处理", str(error))
             return
-        if not config.output_root:
+        if config.operation is not OperationType.LABEL_RENAME and not config.output_root:
             QMessageBox.warning(self, "缺少输出目录", "请手动选择输出目录。")
             return
+        if config.operation is OperationType.LABEL_RENAME:
+            try:
+                dataset = self._project_service.get_project(
+                    config.project_id
+                ).find_dataset(config.dataset_id)
+            except KeyError as error:
+                QMessageBox.warning(self, "数据集不存在", str(error))
+                return
+            confirmation = (
+                f"数据集：{dataset.name}\n原数据目录：{dataset.root_path}\n"
+                f"精确标签：{config.label_rename.source_label} → "
+                f"{config.label_rename.target_label}\n"
+                f"预计检查：{preview.selected_total} 张图片\n\n"
+                "此操作会直接原子写回原始 LabelMe JSON，不创建输出副本。"
+                "全部 JSON 会先完成校验，是否继续？"
+            )
+            title = "确认直接修改原始 JSON"
+        else:
+            confirmation = (
+                f"数据集 ID：{config.dataset_id}\n处理功能：{config.operation.value}\n"
+                f"预计处理：{preview.selected_total} 张图片\n"
+                f"输出根目录：{config.output_root}\n\n是否继续？"
+            )
+            title = "确认开始预处理"
         answer = QMessageBox.question(
-            self, "确认开始预处理",
-            f"数据集 ID：{config.dataset_id}\n处理功能：{config.operation.value}\n"
-            f"预计处理：{preview.selected_total} 张图片\n输出根目录：{config.output_root}\n\n是否继续？",
+            self, title, confirmation,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -473,6 +529,15 @@ class PreprocessingPage(QWidget):
     def _on_success(self, result) -> None:
         self._progress_bar.setValue(100)
         self._status.setText(f"当前状态：完成 — {result.output_directory}")
+        if self._operation is OperationType.LABEL_RENAME:
+            QMessageBox.information(
+                self, "批量标签重命名完成",
+                f"检查 JSON：{result.selected_images}\n"
+                f"修改 JSON：{result.generated_annotations}\n"
+                f"修改 shape：{result.modified_shapes}\n\n"
+                "原始图片未修改。请返回项目首页刷新数据集，以更新类别索引。",
+            )
+            return
         QMessageBox.information(
             self, "数据预处理完成",
             f"输入图片：{result.input_images}\n符合范围：{result.selected_images}\n"
@@ -486,8 +551,12 @@ class PreprocessingPage(QWidget):
         QMessageBox.critical(self, "预处理失败", message)
 
     def _on_cancelled(self, result) -> None:
-        self._status.setText("当前状态：已取消，临时输出已清理")
-        QMessageBox.information(self, "任务已取消", "原始数据未修改，本次临时输出已清理。")
+        if self._operation is OperationType.LABEL_RENAME:
+            self._status.setText("当前状态：已取消，原始 JSON 未修改")
+            QMessageBox.information(self, "任务已取消", "原始 JSON 未修改。")
+        else:
+            self._status.setText("当前状态：已取消，临时输出已清理")
+            QMessageBox.information(self, "任务已取消", "原始数据未修改，本次临时输出已清理。")
 
     def _cancel_processing(self) -> None:
         if self._worker is not None:
@@ -503,12 +572,16 @@ class PreprocessingPage(QWidget):
             worker.deleteLater()
 
     def _update_enabled(self) -> None:
+        output_ready = bool(
+            self._operation is OperationType.LABEL_RENAME
+            or self._output.text().strip()
+        )
         ready = bool(
             self._project_id
             and self._dataset_id
             and self._dataset_ready
             and self._operation
-            and self._output.text().strip()
+            and output_ready
         )
         self._start.setEnabled(ready and self._worker is None)
 

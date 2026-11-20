@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QAbstractItemView, QApplication, QMessageBox
 
 from dataset_manager.application.services.annotation_service import AnnotationService
 from dataset_manager.application.services.dataset_service import DatasetService
@@ -47,6 +48,22 @@ class ProjectDeletionUiTests(unittest.TestCase):
                 PreprocessingService(repository, cache),
                 ModelTestService(repository, cache, object()),
             )
+            operation_list = window._preprocessing._operation_list
+            self.assertEqual(
+                operation_list.dragDropMode(),
+                QAbstractItemView.DragDropMode.InternalMove,
+            )
+            rename_item = next(
+                operation_list.item(row)
+                for row in range(operation_list.count())
+                if operation_list.item(row).data(Qt.ItemDataRole.UserRole)
+                == "label_rename"
+            )
+            operation_list.setCurrentItem(rename_item)
+            self.assertFalse(window._preprocessing._output.isEnabled())
+            moved = operation_list.takeItem(0)
+            operation_list.insertItem(operation_list.count(), moved)
+            self.assertIs(operation_list.item(operation_list.count() - 1), moved)
             self.assertTrue(window._home._delete_button.isEnabled())
 
             with (

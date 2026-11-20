@@ -21,6 +21,8 @@ from dataset_manager.domain.models.project import Dataset, TaskType
 from dataset_manager.infrastructure.scanning.labelme_scanner import LabelMeDatasetScanner
 from dataset_manager.infrastructure.scanning.scan_cache import ScanCacheStore
 from dataset_manager.infrastructure.preprocessing.common import flattened_output_stem
+from dataset_manager.infrastructure.preprocessing.label_rename_engine import LabelRenameEngine
+from dataset_manager.infrastructure.storage.json_store import AtomicJsonStore
 from dataset_manager.infrastructure.storage.project_repository import JsonProjectRepository
 
 
@@ -377,14 +379,15 @@ class PreprocessingTests(unittest.TestCase):
     def test_batch_label_rename_preserves_labelme_and_source_files(self) -> None:
         before_image = digest(self.valid_image)
         before_json = digest(self.valid_json)
-        result = self.service.execute(self.config(
+        result = self.service.execute(ProcessingConfig(
+            self.project_id,
+            self.dataset_id,
+            "",
+            ProcessingScope.VALID_ANNOTATIONS,
             OperationType.LABEL_RENAME,
             label_rename=LabelRenameConfig("defect", "scratch"),
         ))
-        output = Path(result.output_directory)
-        output_image = output / "data" / "valid.jpg"
-        output_json = output / "data" / "valid.json"
-        data = json.loads(output_json.read_text(encoding="utf-8"))
+        data = json.loads(self.valid_json.read_text(encoding="utf-8"))
         self.assertEqual(
             [shape["label"] for shape in data["shapes"]],
             ["scratch", "region"],
@@ -392,18 +395,58 @@ class PreprocessingTests(unittest.TestCase):
         self.assertEqual(data["shapes"][0]["custom"], "preserved")
         self.assertEqual(data["rootExtra"], {"keep": True})
         self.assertEqual(data["imagePath"], "valid.jpg")
-        self.assertIsNone(data["imageData"])
-        self.assertEqual(digest(output_image), before_image)
         self.assertEqual(digest(self.valid_image), before_image)
-        self.assertEqual(digest(self.valid_json), before_json)
-        manifest = json.loads((output / "result_manifest.json").read_text())
-        self.assertEqual(manifest["operation"], "label_rename")
-        self.assertEqual(manifest["parameters"], {
-            "source_label": "defect", "target_label": "scratch",
-        })
+        self.assertNotEqual(digest(self.valid_json), before_json)
+        self.assertEqual(Path(result.output_directory), self.source)
+        self.assertEqual(result.generated_images, 0)
+        self.assertEqual(result.generated_annotations, 1)
+        self.assertEqual(result.modified_shapes, 1)
+        self.assertFalse(self.output.exists())
 
         with self.assertRaises(ValueError):
             LabelRenameConfig("defect", " defect ")
+
+    def test_cancelled_in_place_label_rename_does_not_write(self) -> None:
+        before = digest(self.valid_json)
+        result = self.service.execute(
+            ProcessingConfig(
+                self.project_id, self.dataset_id, "",
+                ProcessingScope.VALID_ANNOTATIONS, OperationType.LABEL_RENAME,
+                label_rename=LabelRenameConfig("defect", "scratch"),
+            ),
+            is_cancelled=lambda: True,
+        )
+        self.assertTrue(result.cancelled)
+        self.assertEqual(digest(self.valid_json), before)
+
+    def test_in_place_label_rename_rolls_back_committed_json_on_failure(self) -> None:
+        second_json = self.source / "second.json"
+        second_json.write_bytes(self.valid_json.read_bytes())
+        originals = {
+            self.valid_json: self.valid_json.read_bytes(),
+            second_json: second_json.read_bytes(),
+        }
+
+        class FailingStore:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.real = AtomicJsonStore()
+
+            def write(self, path, data) -> None:
+                self.calls += 1
+                if self.calls == 2:
+                    raise OSError("simulated write failure")
+                self.real.write(path, data)
+
+        engine = LabelRenameEngine(FailingStore())
+        records = [
+            ProcessingRecord(str(self.valid_image), str(self.valid_json), True),
+            ProcessingRecord(str(self.source / "second.jpg"), str(second_json), True),
+        ]
+        with self.assertRaises(OSError):
+            engine.rename_in_place(records, LabelRenameConfig("defect", "scratch"))
+        for path, original in originals.items():
+            self.assertEqual(path.read_bytes(), original)
 
     def test_yolo_conversion_is_parseable_and_does_not_overwrite(self) -> None:
         raw = json.loads(self.valid_json.read_text())

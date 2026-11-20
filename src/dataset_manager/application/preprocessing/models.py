@@ -192,6 +192,7 @@ class ProcessingResult:
     skipped: int = 0
     generated_images: int = 0
     generated_annotations: int = 0
+    modified_shapes: int = 0
     warnings: list[str] = field(default_factory=list)
     cancelled: bool = False
 
