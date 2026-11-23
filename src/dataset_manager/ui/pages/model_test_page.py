@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton, QSpinBox,
     QTextEdit, QVBoxLayout, QWidget,
 )
@@ -28,7 +27,7 @@ class ModelTestPage(QWidget):
         root.setSpacing(12)
         title = QLabel("模型测试")
         title.setStyleSheet("font-size: 25px; font-weight: 700;")
-        note = QLabel("使用当前扫描数据集逐图推理，测试结果和参数输出为可查阅 JSON。")
+        note = QLabel("选择模型和已扫描数据集，在每张原图旁生成标准 LabelMe JSON 标注。")
         note.setStyleSheet("color: #7b8491;")
         root.addWidget(title)
         root.addWidget(note)
@@ -53,7 +52,6 @@ class ModelTestPage(QWidget):
 
         self._model_type = QComboBox()
         self._model_type.addItem("YOLO 目标检测", ModelType.YOLO_DETECTION)
-        self._model_type.addItem("YOLO 图像分类", ModelType.YOLO_CLASSIFICATION)
         self._model_type.addItem("YOLO 实例分割", ModelType.YOLO_SEGMENTATION)
         form.addRow("模型类型", self._model_type)
 
@@ -92,17 +90,19 @@ class ModelTestPage(QWidget):
         self._device.setPlaceholderText("留空=自动；也可输入 cpu、0、0,1")
         form.addRow("运行设备", self._device)
 
-        self._output_path = QLineEdit()
-        output_row = QHBoxLayout()
-        output_row.addWidget(self._output_path, 1)
-        output_browse = QPushButton("选择")
-        output_browse.clicked.connect(self._browse_output)
-        output_row.addWidget(output_browse)
-        form.addRow("结果 JSON", output_row)
+        self._overwrite_existing = QCheckBox("覆盖已有 LabelMe JSON")
+        self._overwrite_existing.setToolTip("默认跳过已有 JSON；勾选后，模型结果会替换原标注")
+        form.addRow("已有标注", self._overwrite_existing)
+        warning = QLabel(
+            "默认跳过已有 JSON。全部图片推理结束后才统一写入；中途取消不会写入任何标注。"
+        )
+        warning.setWordWrap(True)
+        warning.setStyleSheet("color: #b26a00;")
+        form.addRow("", warning)
         root.addWidget(card)
 
         action_row = QHBoxLayout()
-        self._start = QPushButton("开始模型测试")
+        self._start = QPushButton("开始推理并生成标注")
         self._start.clicked.connect(self._start_test)
         self._cancel = QPushButton("取消")
         self._cancel.setEnabled(False)
@@ -119,7 +119,7 @@ class ModelTestPage(QWidget):
         self._report = QTextEdit()
         self._report.setReadOnly(True)
         self._report.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self._report.setPlaceholderText("测试完成后在此预览结果 JSON")
+        self._report.setPlaceholderText("完成后在此显示 LabelMe 标注生成结果")
         root.addWidget(self._progress)
         root.addWidget(self._status)
         root.addWidget(self._report, 1)
@@ -179,14 +179,6 @@ class ModelTestPage(QWidget):
         if path:
             self._model_path.setText(path)
 
-    def _browse_output(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self, "保存测试结果", self._output_path.text() or "model_test_result.json",
-            "JSON 文件 (*.json)",
-        )
-        if path:
-            self._output_path.setText(path if path.casefold().endswith(".json") else path + ".json")
-
     def _build_config(self) -> ModelTestConfig:
         project_id = self._project.currentData()
         dataset_id = self._dataset.currentData()
@@ -206,7 +198,7 @@ class ModelTestPage(QWidget):
             iou_threshold=self._iou.value(),
             max_detections=self._max_detections.value(),
             device=self._device.text().strip(),
-            output_json=self._output_path.text().strip(),
+            overwrite_existing=self._overwrite_existing.isChecked(),
         )
 
     def _start_test(self) -> None:
@@ -215,6 +207,17 @@ class ModelTestPage(QWidget):
         except ValueError as error:
             QMessageBox.warning(self, "配置错误", str(error))
             return
+        if config.overwrite_existing:
+            answer = QMessageBox.question(
+                self,
+                "确认覆盖已有标注",
+                "已勾选覆盖已有 LabelMe JSON。模型生成的标注将替换数据集中的原标注，"
+                "但原图片不会被修改。是否继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         self._worker = ModelTestWorker(self._service, config, self)
         self._worker.progress_changed.connect(self._update_progress)
         self._worker.succeeded.connect(self._completed)
@@ -230,19 +233,28 @@ class ModelTestPage(QWidget):
         self._progress.setValue(progress.processed)
         self._status.setText(
             f"已处理 {progress.processed}/{progress.total}，成功 {progress.succeeded}，"
-            f"失败 {progress.failed}：{Path(progress.current_image).name}"
+            f"跳过已有 {progress.skipped}，失败 {progress.failed}："
+            f"{Path(progress.current_image).name}"
         )
 
     def _completed(self, result) -> None:
-        status = "已取消，已保存部分结果" if result.cancelled else "模型测试完成"
-        self._status.setText(
-            f"{status}：成功 {result.succeeded}，失败 {result.failed}；{result.output_json}"
+        if result.cancelled:
+            self._status.setText("已取消，未写入任何 LabelMe JSON")
+            self._report.setPlainText(
+                f"已处理 {result.succeeded + result.failed + result.skipped_existing}/"
+                f"{result.total} 张图片。由于任务被取消，本次推理结果均未写入数据集。"
+            )
+            return
+        summary = (
+            f"模型测试完成：共 {result.total} 张，成功推理 {result.succeeded} 张，"
+            f"生成 LabelMe JSON {result.generated_annotations} 个，"
+            f"跳过已有标注 {result.skipped_existing} 个，失败 {result.failed} 张。"
         )
-        try:
-            data = json.loads(Path(result.output_json).read_text(encoding="utf-8"))
-            self._report.setPlainText(json.dumps(data, ensure_ascii=False, indent=2))
-        except (OSError, ValueError) as error:
-            self._report.setPlainText(f"结果已生成，但预览失败：{error}")
+        self._status.setText(summary)
+        self._report.setPlainText(
+            summary + "\n\n标注文件已保存到对应原图片所在目录。"
+            "请返回项目首页重新扫描该数据集，以刷新有效标注数量和类别。"
+        )
 
     def _failed(self, message: str) -> None:
         self._status.setText("模型测试失败")

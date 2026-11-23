@@ -21,7 +21,6 @@ class UltralyticsRunner:
         self._model = YOLO(config.model_path)
         expected = {
             ModelType.YOLO_DETECTION: "detect",
-            ModelType.YOLO_CLASSIFICATION: "classify",
             ModelType.YOLO_SEGMENTATION: "segment",
         }[config.model_type]
         actual = str(getattr(self._model, "task", "unknown"))
@@ -38,16 +37,13 @@ class UltralyticsRunner:
             "imgsz": (config.image_height, config.image_width),
             "verbose": False,
             "device": config.device.strip() or None,
+            "conf": config.confidence,
+            "iou": config.iou_threshold,
+            "max_det": config.max_detections,
         }
-        if config.model_type is not ModelType.YOLO_CLASSIFICATION:
-            arguments.update(
-                conf=config.confidence,
-                iou=config.iou_threshold,
-                max_det=config.max_detections,
-            )
         results = self._model.predict(**arguments)
         if not results:
-            return {"inference": [], "speed_ms": {}}
+            return {"detections": [], "segments": [], "speed_ms": {}}
         result = results[0]
         payload: dict[str, Any] = {
             "original_shape": list(getattr(result, "orig_shape", ())),
@@ -56,12 +52,9 @@ class UltralyticsRunner:
                 for key, value in dict(getattr(result, "speed", {}) or {}).items()
             },
         }
-        if config.model_type is ModelType.YOLO_CLASSIFICATION:
-            payload["classification"] = self._classification(result)
-        else:
-            payload["detections"] = self._detections(result)
-            if config.model_type is ModelType.YOLO_SEGMENTATION:
-                payload["segments"] = self._segments(result)
+        payload["detections"] = self._detections(result)
+        if config.model_type is ModelType.YOLO_SEGMENTATION:
+            payload["segments"] = self._segments(result)
         return payload
 
     @staticmethod
@@ -88,22 +81,6 @@ class UltralyticsRunner:
                 "box_xyxy": [round(float(value), 4) for value in coordinates],
             }
             for coordinates, confidence, class_id in zip(xyxy, confidences, classes)
-        ]
-
-    def _classification(self, result: Any) -> list[dict[str, Any]]:
-        probabilities = getattr(result, "probs", None)
-        if probabilities is None:
-            return []
-        names = self._names(getattr(result, "names", {}))
-        top_ids = list(getattr(probabilities, "top5", []) or [])
-        values = probabilities.data.detach().cpu().tolist()
-        return [
-            {
-                "class_id": int(class_id),
-                "class_name": names.get(str(int(class_id)), str(int(class_id))),
-                "confidence": round(float(values[int(class_id)]), 8),
-            }
-            for class_id in top_ids
         ]
 
     @staticmethod
