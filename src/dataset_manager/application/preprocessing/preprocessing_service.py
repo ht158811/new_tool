@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -76,6 +77,12 @@ class PreprocessingService:
             return self._execute_label_rename_in_place(
                 config, dataset, records, selected_records, progress, cancelled
             )
+        if config.operation is OperationType.DELETE_UNANNOTATED:
+            if config.scope is not ProcessingScope.WITHOUT_JSON:
+                raise ValueError("删除无 JSON 图片仅支持‘没有对应 JSON 的图片’范围")
+            return self._execute_delete_unannotated_in_place(
+                dataset, records, selected_records, progress, cancelled
+            )
         selected = self._assign_output_stems(selected_records)
         if not config.output_root.strip():
             raise ValueError("必须指定输出目录")
@@ -116,6 +123,7 @@ class PreprocessingService:
                 "skipped": result.skipped,
                 "generated_images": result.generated_images,
                 "generated_annotations": result.generated_annotations,
+                "deleted_images": result.deleted_images,
                 "warnings": result.warnings,
                 "completed_at": datetime.now().astimezone().isoformat(),
                 "complete": True,
@@ -251,6 +259,117 @@ class PreprocessingService:
         )
         return result
 
+    def _execute_delete_unannotated_in_place(
+        self, dataset, records, selected, progress, cancelled
+    ) -> ProcessingResult:
+        """Transactionally remove images that still have no colocated LabelMe JSON."""
+        root = Path(dataset.root_path).expanduser().resolve()
+        result = ProcessingResult(
+            output_directory=str(root),
+            input_images=len(records),
+            selected_images=len(selected),
+            skipped=len(records) - len(selected),
+        )
+        staging = Path(tempfile.mkdtemp(prefix=".dataset_manager_delete_", dir=root))
+        staged: list[tuple[Path, Path]] = []
+        json_cache: dict[Path, list[Path]] = {}
+        try:
+            for index, record in enumerate(selected, start=1):
+                if cancelled():
+                    raise _Cancelled
+                source_path = Path(record.image_path).expanduser()
+                source_is_symlink = source_path.is_symlink()
+                image = source_path.resolve()
+                if (
+                    not image.is_relative_to(root)
+                    or not image.is_file()
+                    or source_is_symlink
+                    or self._has_corresponding_json(image, json_cache)
+                ):
+                    result.skipped += 1
+                    result.warnings.append(
+                        f"已跳过（文件不存在、超出目录或已有 JSON）：{image.name}"
+                    )
+                else:
+                    staged_path = staging / f"{index:08d}{image.suffix}"
+                    os.replace(image, staged_path)
+                    staged.append((staged_path, image))
+                    result.succeeded += 1
+                self._emit(
+                    progress, len(selected), index, result, image.name,
+                    "复核并暂存待删除图片",
+                )
+            if cancelled():
+                raise _Cancelled
+            shutil.rmtree(staging)
+            result.deleted_images = len(staged)
+            self._emit(
+                progress, len(selected), len(selected), result,
+                f"删除 {result.deleted_images} 张图片", "原目录清理完成",
+            )
+            return result
+        except _Cancelled:
+            self._restore_staged_images(staged)
+            shutil.rmtree(staging, ignore_errors=True)
+            result.succeeded = 0
+            result.deleted_images = 0
+            result.cancelled = True
+            return result
+        except Exception:
+            self._restore_staged_images(staged)
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+
+    @staticmethod
+    def _restore_staged_images(staged: list[tuple[Path, Path]]) -> None:
+        errors: list[str] = []
+        for staged_path, original in reversed(staged):
+            try:
+                if staged_path.exists():
+                    original.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(staged_path, original)
+            except OSError as error:
+                errors.append(f"{original}: {error}")
+        if errors:
+            raise OSError("删除回滚失败：" + "; ".join(errors))
+
+    @staticmethod
+    def _has_corresponding_json(
+        image: Path, cache: dict[Path, list[Path]]
+    ) -> bool:
+        parent = image.parent.resolve()
+        annotations = cache.get(parent)
+        if annotations is None:
+            annotations = sorted(
+                (
+                    path for path in parent.iterdir()
+                    if path.is_file() and path.suffix.casefold() == ".json"
+                ),
+                key=lambda path: path.name.casefold(),
+            )
+            cache[parent] = annotations
+        for annotation in annotations:
+            if annotation.stem.casefold() == image.stem.casefold():
+                return True
+            try:
+                with annotation.open("r", encoding="utf-8-sig") as stream:
+                    document = json.load(stream)
+                declared = document.get("imagePath") if isinstance(document, dict) else None
+                if not isinstance(declared, str) or not declared.strip():
+                    continue
+                declared_path = Path(declared.replace("\\", "/"))
+                if declared_path.name.casefold() == image.name.casefold():
+                    return True
+                candidate = (
+                    declared_path if declared_path.is_absolute()
+                    else annotation.parent / declared_path
+                )
+                if os.path.normcase(str(candidate.resolve())) == os.path.normcase(str(image)):
+                    return True
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+        return False
+
     @staticmethod
     def _assign_output_stems(records: list[ProcessingRecord]) -> list[ProcessingRecord]:
         """Preserve source names and add only a short numeric suffix on collisions."""
@@ -308,6 +427,7 @@ class PreprocessingService:
             OperationType.LABEL_SPLIT: "LabelSplit",
             OperationType.LABEL_RENAME: "LabelRename",
             OperationType.CONVERSION: "Conversion",
+            OperationType.DELETE_UNANNOTATED: "DeleteUnannotated",
         }[operation]
         date = datetime.now().strftime("%Y%m%d")
         for index in range(1, 10000):

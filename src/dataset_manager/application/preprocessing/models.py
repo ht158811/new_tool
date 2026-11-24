@@ -17,6 +17,7 @@ class OperationType(str, Enum):
     LABEL_SPLIT = "label_split"
     LABEL_RENAME = "label_rename"
     CONVERSION = "conversion"
+    DELETE_UNANNOTATED = "delete_unannotated"
 
 
 class ConversionTarget(str, Enum):
@@ -80,6 +81,21 @@ class AugmentationConfig:
 @dataclass(frozen=True, slots=True)
 class ConversionConfig:
     target: ConversionTarget = ConversionTarget.YOLO
+    validation_ratio: float = 0.0
+    test_ratio: float = 0.0
+    split_seed: int = 42
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, ConversionTarget):
+            object.__setattr__(self, "target", ConversionTarget(self.target))
+        if not 0.0 <= self.validation_ratio < 1.0:
+            raise ValueError("验证集比例必须在 0%（含）到 100%（不含）之间")
+        if not 0.0 <= self.test_ratio < 1.0:
+            raise ValueError("测试集比例必须在 0%（含）到 100%（不含）之间")
+        if self.validation_ratio + self.test_ratio >= 1.0:
+            raise ValueError("验证集与测试集比例之和必须小于 100%，需保留训练集")
+        if self.split_seed < 0:
+            raise ValueError("划分随机种子不能小于 0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +209,7 @@ class ProcessingResult:
     generated_images: int = 0
     generated_annotations: int = 0
     modified_shapes: int = 0
+    deleted_images: int = 0
     warnings: list[str] = field(default_factory=list)
     cancelled: bool = False
 

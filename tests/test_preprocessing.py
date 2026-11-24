@@ -480,6 +480,110 @@ class PreprocessingTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             self.service.execute(custom)
 
+    def test_conversion_splits_train_validation_and_test_deterministically(self) -> None:
+        raw = json.loads(self.valid_json.read_text())
+        raw["shapes"] = [raw["shapes"][0]]
+        self.valid_json.write_text(json.dumps(raw), encoding="utf-8")
+        for index in range(1, 10):
+            image = self.source / f"sample_{index}.jpg"
+            annotation = image.with_suffix(".json")
+            Image.new("RGB", (100, 80), (index, 20, 30)).save(image)
+            write_label(annotation, image.name)
+            document = json.loads(annotation.read_text())
+            document["shapes"] = [document["shapes"][0]]
+            annotation.write_text(json.dumps(document), encoding="utf-8")
+        ScanService(
+            self.repository, LabelMeDatasetScanner(), self.cache
+        ).refresh_dataset(self.project_id, self.dataset_id)
+        split_config = ConversionConfig(
+            ConversionTarget.YOLO, validation_ratio=0.2, test_ratio=0.1, split_seed=123
+        )
+
+        first = self.service.execute(self.config(
+            OperationType.CONVERSION,
+            conversion=split_config,
+        ))
+        second = self.service.execute(self.config(
+            OperationType.CONVERSION,
+            conversion=split_config,
+        ))
+
+        first_root, second_root = Path(first.output_directory), Path(second.output_directory)
+        expected = {"train": 7, "val": 2, "test": 1}
+        for split, count in expected.items():
+            first_names = {
+                path.name for path in (first_root / "images" / split).rglob("*.jpg")
+            }
+            second_names = {
+                path.name for path in (second_root / "images" / split).rglob("*.jpg")
+            }
+            self.assertEqual(len(first_names), count)
+            self.assertEqual(first_names, second_names)
+            self.assertEqual(
+                len(list((first_root / "labels" / split).rglob("*.txt"))), count
+            )
+
+        coco = self.service.execute(self.config(
+            OperationType.CONVERSION,
+            conversion=ConversionConfig(
+                ConversionTarget.COCO, validation_ratio=0.2,
+                test_ratio=0.1, split_seed=123,
+            ),
+        ))
+        coco_root = Path(coco.output_directory)
+        for split, count in expected.items():
+            annotation_file = coco_root / "annotations" / f"instances_{split}.json"
+            document = json.loads(annotation_file.read_text())
+            self.assertEqual(len(document["images"]), count)
+            self.assertEqual(len(list((coco_root / "images" / split).rglob("*.jpg"))), count)
+
+    def test_delete_unannotated_images_in_place_and_rechecks_late_json(self) -> None:
+        unannotated = self.source / "without.jpg"
+        late_json = self.source / "manual_annotation.json"
+        write_label(late_json, unannotated.name)
+        config = ProcessingConfig(
+            self.project_id, self.dataset_id, "",
+            ProcessingScope.WITHOUT_JSON, OperationType.DELETE_UNANNOTATED,
+        )
+
+        protected = self.service.execute(config)
+        self.assertTrue(unannotated.exists())
+        self.assertEqual(protected.deleted_images, 0)
+        self.assertEqual(protected.succeeded, 0)
+
+        late_json.unlink()
+        deleted = self.service.execute(config)
+        self.assertFalse(unannotated.exists())
+        self.assertEqual(deleted.deleted_images, 1)
+        self.assertTrue(self.valid_image.exists())
+        self.assertTrue((self.source / "invalid.jpg").exists())
+
+    def test_cancel_delete_unannotated_restores_staged_images(self) -> None:
+        second = self.source / "without_second.jpg"
+        Image.new("RGB", (100, 80), (1, 2, 3)).save(second)
+        ScanService(
+            self.repository, LabelMeDatasetScanner(), self.cache
+        ).refresh_dataset(self.project_id, self.dataset_id)
+        checks = 0
+
+        def cancel_after_first_stage() -> bool:
+            nonlocal checks
+            checks += 1
+            return checks >= 2
+
+        result = self.service.execute(
+            ProcessingConfig(
+                self.project_id, self.dataset_id, "",
+                ProcessingScope.WITHOUT_JSON, OperationType.DELETE_UNANNOTATED,
+            ),
+            is_cancelled=cancel_after_first_stage,
+        )
+
+        self.assertTrue(result.cancelled)
+        self.assertTrue((self.source / "without.jpg").exists())
+        self.assertTrue(second.exists())
+        self.assertFalse(any(self.source.glob(".dataset_manager_delete_*")))
+
     def test_coco_includes_unannotated_images_and_voc_is_parseable(self) -> None:
         raw = json.loads(self.valid_json.read_text())
         raw["shapes"] = [raw["shapes"][0]]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import random
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from pathlib import Path
@@ -37,9 +38,9 @@ class ConversionEngine:
         if not category_to_id:
             raise ValueError("没有可用于转换的类别")
         if config.target is ConversionTarget.COCO:
-            return self._to_coco(
-                records, dataset_root, output_directory, category_to_id,
-                is_cancelled, on_record,
+            return self._to_coco_partitions(
+                self._partition_records(records, config), dataset_root,
+                output_directory, category_to_id, is_cancelled, on_record,
             )
         generated_images = generated_annotations = 0
         warnings: list[str] = []
@@ -47,27 +48,107 @@ class ConversionEngine:
             (output_directory / "classes.txt").write_text(
                 "\n".join(categories) + "\n", encoding="utf-8"
             )
-        for index, record in enumerate(records, start=1):
-            self._check_cancelled(is_cancelled)
-            relative = relative_output_path(record.image_path, dataset_root)
-            image_output = output_directory / "images" / relative
-            copy_image_exact(record.image_path, image_output)
-            generated_images += 1
-            if not record.annotation_valid or not record.annotation_path:
-                warnings.append(f"无有效标注，仅复制图片: {Path(record.image_path).name}")
+        processed = 0
+        for partition, partition_records in self._partition_records(records, config).items():
+            partition_path = Path(partition) if partition else Path()
+            for record in partition_records:
+                self._check_cancelled(is_cancelled)
+                relative = relative_output_path(record.image_path, dataset_root)
+                image_output = output_directory / "images" / partition_path / relative
+                copy_image_exact(record.image_path, image_output)
+                generated_images += 1
+                if not record.annotation_valid or not record.annotation_path:
+                    warnings.append(f"无有效标注，仅复制图片: {Path(record.image_path).name}")
+                else:
+                    raw = load_json_copy(record.annotation_path)
+                    suffix = ".txt" if config.target is ConversionTarget.YOLO else ".xml"
+                    label_output = (
+                        output_directory / "labels" / partition_path /
+                        relative.with_suffix(suffix)
+                    )
+                    if config.target is ConversionTarget.YOLO:
+                        self._write_yolo(raw, label_output, category_to_id)
+                    else:
+                        self._write_voc(raw, label_output, image_output.name, category_to_id)
+                    generated_annotations += 1
+                processed += 1
                 if on_record is not None:
-                    on_record(index, Path(record.image_path).name)
+                    on_record(processed, Path(record.image_path).name)
+        return generated_images, generated_annotations, warnings
+
+    @staticmethod
+    def _partition_records(
+        records: list[ProcessingRecord], config: ConversionConfig
+    ) -> dict[str, list[ProcessingRecord]]:
+        """Return a deterministic train/val/test split without changing source order."""
+        if config.validation_ratio == 0.0 and config.test_ratio == 0.0:
+            return {"": list(records)}
+        shuffled = list(records)
+        random.Random(config.split_seed).shuffle(shuffled)
+        ratios = {
+            "train": 1.0 - config.validation_ratio - config.test_ratio,
+            "val": config.validation_ratio,
+            "test": config.test_ratio,
+        }
+        required_partitions = [name for name, ratio in ratios.items() if ratio > 0]
+        if len(shuffled) < len(required_partitions):
+            raise ValueError(
+                f"当前仅有 {len(shuffled)} 张图片，无法同时划分到 "
+                f"{len(required_partitions)} 个非空数据集"
+            )
+        raw_counts = {name: len(shuffled) * ratio for name, ratio in ratios.items()}
+        counts = {name: int(value) for name, value in raw_counts.items()}
+        remainder = len(shuffled) - sum(counts.values())
+        for name in sorted(
+            ratios, key=lambda item: (raw_counts[item] - counts[item], ratios[item]),
+            reverse=True,
+        )[:remainder]:
+            counts[name] += 1
+        for name in required_partitions:
+            if counts[name] > 0:
                 continue
-            raw = load_json_copy(record.annotation_path)
-            if config.target is ConversionTarget.YOLO:
-                label_output = output_directory / "labels" / relative.with_suffix(".txt")
-                self._write_yolo(raw, label_output, category_to_id)
-            else:
-                label_output = output_directory / "labels" / relative.with_suffix(".xml")
-                self._write_voc(raw, label_output, image_output.name, category_to_id)
-            generated_annotations += 1
-            if on_record is not None:
-                on_record(index, Path(record.image_path).name)
+            donors = [
+                candidate for candidate in required_partitions
+                if counts[candidate] > 1
+            ]
+            if not donors:
+                raise ValueError("图片数量不足，无法保证训练集、验证集和测试集均非空")
+            donor = max(donors, key=lambda candidate: counts[candidate])
+            counts[donor] -= 1
+            counts[name] += 1
+        train_count = counts["train"]
+        validation_count = counts["val"]
+        return {
+            "train": shuffled[:train_count],
+            "val": shuffled[train_count:train_count + validation_count],
+            "test": shuffled[train_count + validation_count:],
+        }
+
+    def _to_coco_partitions(
+        self,
+        partitions: dict[str, list[ProcessingRecord]],
+        dataset_root: str,
+        output_directory: Path,
+        category_to_id: dict[str, int],
+        is_cancelled: Callable[[], bool] | None,
+        on_record: Callable[[int, str], None] | None,
+    ) -> tuple[int, int, list[str]]:
+        generated_images = generated_annotations = processed = 0
+        warnings: list[str] = []
+        split_enabled = "" not in partitions
+        for partition, records in partitions.items():
+            def report(local_processed: int, current: str, *, offset: int = processed) -> None:
+                if on_record is not None:
+                    on_record(offset + local_processed, current)
+
+            images, annotations, partition_warnings = self._to_coco(
+                records, dataset_root, output_directory, category_to_id,
+                is_cancelled, report, partition if split_enabled else "",
+            )
+            generated_images += images
+            generated_annotations += annotations
+            processed += len(records)
+            warnings.extend(partition_warnings)
         return generated_images, generated_annotations, warnings
 
     def _write_yolo(self, raw: dict[str, Any], path: Path, category_to_id: dict[str, int]) -> None:
@@ -115,13 +196,15 @@ class ConversionEngine:
         category_to_id: dict[str, int],
         is_cancelled: Callable[[], bool] | None,
         on_record: Callable[[int, str], None] | None,
+        partition: str = "",
     ) -> tuple[int, int, list[str]]:
         images, annotations, warnings = [], [], []
         annotation_id = 1
         for image_id, record in enumerate(records, start=1):
             self._check_cancelled(is_cancelled)
             relative = relative_output_path(record.image_path, dataset_root)
-            image_output = output_directory / "images" / relative
+            partition_path = Path(partition) if partition else Path()
+            image_output = output_directory / "images" / partition_path / relative
             copy_image_exact(record.image_path, image_output)
             if not record.annotation_valid or not record.annotation_path:
                 with Image.open(record.image_path) as source:
@@ -161,7 +244,11 @@ class ConversionEngine:
                 for name, class_id in category_to_id.items()
             ],
         }
-        self._json_store.write(output_directory / "annotations.json", coco)
+        annotation_output = (
+            output_directory / "annotations" / f"instances_{partition}.json"
+            if partition else output_directory / "annotations.json"
+        )
+        self._json_store.write(annotation_output, coco)
         return len(records), sum(record.annotation_valid for record in records), warnings
 
     @staticmethod

@@ -115,6 +115,7 @@ class PreprocessingPage(QWidget):
             (OperationType.LABEL_SPLIT, "标签分割", 3),
             (OperationType.LABEL_RENAME, "批量标签重命名", 4),
             (OperationType.CONVERSION, "格式转换", 5),
+            (OperationType.DELETE_UNANNOTATED, "删除无 JSON 图片", 6),
         ):
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, operation.value)
@@ -137,6 +138,7 @@ class PreprocessingPage(QWidget):
         self._config_stack.addWidget(self._build_label_split_panel())
         self._config_stack.addWidget(self._build_label_rename_panel())
         self._config_stack.addWidget(self._build_conversion_panel())
+        self._config_stack.addWidget(self._build_delete_unannotated_panel())
         config_layout.addWidget(self._config_stack)
         root.addWidget(config_box)
 
@@ -263,9 +265,60 @@ class PreprocessingPage(QWidget):
         self._conversion_target.addItem("COCO JSON", ConversionTarget.COCO)
         self._conversion_target.addItem("Pascal VOC XML", ConversionTarget.VOC)
         form.addRow("目标格式", self._conversion_target)
-        note = QLabel("当前实现目标检测转换。分类映射和语义分割目标格式尚待确认。")
+        ratio_row = QHBoxLayout()
+        self._conversion_validation_ratio = QDoubleSpinBox()
+        self._conversion_validation_ratio.setRange(0.0, 99.0)
+        self._conversion_validation_ratio.setDecimals(1)
+        self._conversion_validation_ratio.setSuffix("%")
+        self._conversion_validation_ratio.setValue(20.0)
+        self._conversion_test_ratio = QDoubleSpinBox()
+        self._conversion_test_ratio.setRange(0.0, 99.0)
+        self._conversion_test_ratio.setDecimals(1)
+        self._conversion_test_ratio.setSuffix("%")
+        self._conversion_test_ratio.setValue(10.0)
+        ratio_row.addWidget(QLabel("验证集"))
+        ratio_row.addWidget(self._conversion_validation_ratio)
+        ratio_row.addWidget(QLabel("测试集"))
+        ratio_row.addWidget(self._conversion_test_ratio)
+        form.addRow("数据集划分", ratio_row)
+        self._conversion_train_ratio = QLabel()
+        form.addRow("训练集比例", self._conversion_train_ratio)
+        self._conversion_validation_ratio.valueChanged.connect(
+            self._update_conversion_train_ratio
+        )
+        self._conversion_test_ratio.valueChanged.connect(
+            self._update_conversion_train_ratio
+        )
+        self._conversion_split_seed = self._spin(0, 2_147_483_647, 42)
+        form.addRow("划分随机种子", self._conversion_split_seed)
+        self._update_conversion_train_ratio()
+        note = QLabel(
+            "训练集比例自动计算。使用相同随机种子可重复得到相同划分；"
+            "比例都设为 0 时保持原有未划分目录结构。当前实现目标检测转换。"
+        )
         note.setWordWrap(True)
         form.addRow(note)
+        return panel
+
+    def _update_conversion_train_ratio(self) -> None:
+        ratio = (
+            100.0 - self._conversion_validation_ratio.value()
+            - self._conversion_test_ratio.value()
+        )
+        self._conversion_train_ratio.setText(f"{ratio:.1f}%")
+        color = "#c62828" if ratio <= 0 else "#2e7d32"
+        self._conversion_train_ratio.setStyleSheet(f"color: {color}; font-weight: 600;")
+
+    def _build_delete_unannotated_panel(self) -> QWidget:
+        panel = QWidget()
+        form = QFormLayout(panel)
+        warning = QLabel(
+            "直接删除当前数据集原目录及其子目录中没有对应 LabelMe JSON 的图片。"
+            "执行前会再次检查同名 JSON 和 JSON 的 imagePath 关联；操作完成后请重新扫描数据集。"
+        )
+        warning.setWordWrap(True)
+        warning.setStyleSheet("color: #c62828; font-weight: 600;")
+        form.addRow(warning)
         return panel
 
     def _build_label_rename_panel(self) -> QWidget:
@@ -278,8 +331,8 @@ class PreprocessingPage(QWidget):
         form.addRow("要修改的标签名", self._rename_source_label)
         form.addRow("修改后的标签名", self._rename_target_label)
         note = QLabel(
-            "仅精确修改 LabelMe JSON 的 shapes[].label。图片和 JSON 会输出到新的 data "
-            "目录，其他字段保持不变，原始数据不会修改。"
+            "仅精确修改原始 LabelMe JSON 的 shapes[].label，其他字段和图片保持不变。"
+            "全部目标 JSON 会先校验，写入失败时回滚已修改文件。"
         )
         note.setWordWrap(True)
         form.addRow(note)
@@ -355,25 +408,35 @@ class PreprocessingPage(QWidget):
     def _select_operation(self, operation: OperationType, index: int) -> None:
         self._operation = operation
         self._config_stack.setCurrentIndex(index)
-        in_place = operation is OperationType.LABEL_RENAME
+        in_place = operation in {
+            OperationType.LABEL_RENAME, OperationType.DELETE_UNANNOTATED,
+        }
         self._output_box.setTitle(
-            "输出目录（批量标签重命名直接修改原 JSON，无需填写）"
+            "输出目录（当前功能直接操作原数据，无需填写）"
             if in_place else "输出目录（强制）"
         )
         self._output.setEnabled(not in_place)
         self._output_browse.setEnabled(not in_place)
         self._result_name.setEnabled(not in_place)
         self._output.setPlaceholderText(
-            "批量标签重命名直接操作原数据"
+            "当前功能直接操作原数据"
             if in_place else "必须选择原始数据集之外的输出目录"
         )
         label_operation = operation in {
             OperationType.LABEL_SPLIT, OperationType.LABEL_RENAME,
         }
         for scope, radio in self._scope_radios.items():
-            radio.setEnabled(not label_operation or scope is ProcessingScope.VALID_ANNOTATIONS)
+            allowed = (
+                scope is ProcessingScope.VALID_ANNOTATIONS if label_operation
+                else scope is ProcessingScope.WITHOUT_JSON
+                if operation is OperationType.DELETE_UNANNOTATED
+                else True
+            )
+            radio.setEnabled(allowed)
         if label_operation:
             self._scope_radios[ProcessingScope.VALID_ANNOTATIONS].setChecked(True)
+        elif operation is OperationType.DELETE_UNANNOTATED:
+            self._scope_radios[ProcessingScope.WITHOUT_JSON].setChecked(True)
         self._update_enabled()
 
     def _selected_scope(self) -> ProcessingScope:
@@ -460,9 +523,14 @@ class PreprocessingPage(QWidget):
                 source_label=self._rename_source_label.text(),
                 target_label=self._rename_target_label.text(),
             ))
-        return ProcessingConfig(**common, conversion=ConversionConfig(
-            self._conversion_target.currentData()
-        ))
+        if self._operation is OperationType.CONVERSION:
+            return ProcessingConfig(**common, conversion=ConversionConfig(
+                target=self._conversion_target.currentData(),
+                validation_ratio=self._conversion_validation_ratio.value() / 100.0,
+                test_ratio=self._conversion_test_ratio.value() / 100.0,
+                split_seed=self._conversion_split_seed.value(),
+            ))
+        return ProcessingConfig(**common)
 
     def _start_processing(self) -> None:
         try:
@@ -471,10 +539,13 @@ class PreprocessingPage(QWidget):
         except (OSError, KeyError, ValueError) as error:
             QMessageBox.warning(self, "无法开始处理", str(error))
             return
-        if config.operation is not OperationType.LABEL_RENAME and not config.output_root:
+        in_place = config.operation in {
+            OperationType.LABEL_RENAME, OperationType.DELETE_UNANNOTATED,
+        }
+        if not in_place and not config.output_root:
             QMessageBox.warning(self, "缺少输出目录", "请手动选择输出目录。")
             return
-        if config.operation is OperationType.LABEL_RENAME:
+        if in_place:
             try:
                 dataset = self._project_service.get_project(
                     config.project_id
@@ -482,21 +553,41 @@ class PreprocessingPage(QWidget):
             except KeyError as error:
                 QMessageBox.warning(self, "数据集不存在", str(error))
                 return
-            confirmation = (
-                f"数据集：{dataset.name}\n原数据目录：{dataset.root_path}\n"
-                f"精确标签：{config.label_rename.source_label} → "
-                f"{config.label_rename.target_label}\n"
-                f"预计检查：{preview.selected_total} 张图片\n\n"
-                "此操作会直接原子写回原始 LabelMe JSON，不创建输出副本。"
-                "全部 JSON 会先完成校验，是否继续？"
-            )
-            title = "确认直接修改原始 JSON"
+            if config.operation is OperationType.LABEL_RENAME:
+                confirmation = (
+                    f"数据集：{dataset.name}\n原数据目录：{dataset.root_path}\n"
+                    f"精确标签：{config.label_rename.source_label} → "
+                    f"{config.label_rename.target_label}\n"
+                    f"预计检查：{preview.selected_total} 张图片\n\n"
+                    "此操作会直接原子写回原始 LabelMe JSON，不创建输出副本。"
+                    "全部 JSON 会先完成校验，是否继续？"
+                )
+                title = "确认直接修改原始 JSON"
+            else:
+                confirmation = (
+                    f"数据集：{dataset.name}\n原数据目录：{dataset.root_path}\n"
+                    f"预计删除：{preview.selected_total} 张无 JSON 图片\n\n"
+                    "此操作会在原文件夹中永久删除图片，不创建输出副本。"
+                    "执行时会再次复核 JSON 关联，是否继续？"
+                )
+                title = "确认永久删除无 JSON 图片"
         else:
             confirmation = (
                 f"数据集 ID：{config.dataset_id}\n处理功能：{config.operation.value}\n"
                 f"预计处理：{preview.selected_total} 张图片\n"
                 f"输出根目录：{config.output_root}\n\n是否继续？"
             )
+            if config.operation is OperationType.CONVERSION:
+                train_ratio = (
+                    1.0 - config.conversion.validation_ratio
+                    - config.conversion.test_ratio
+                )
+                confirmation = confirmation.replace(
+                    "\n\n是否继续？",
+                    f"\n训练/验证/测试：{train_ratio:.1%} / "
+                    f"{config.conversion.validation_ratio:.1%} / "
+                    f"{config.conversion.test_ratio:.1%}\n\n是否继续？",
+                )
             title = "确认开始预处理"
         answer = QMessageBox.question(
             self, title, confirmation,
@@ -538,6 +629,15 @@ class PreprocessingPage(QWidget):
                 "原始图片未修改。请返回项目首页刷新数据集，以更新类别索引。",
             )
             return
+        if self._operation is OperationType.DELETE_UNANNOTATED:
+            QMessageBox.information(
+                self, "无 JSON 图片清理完成",
+                f"检查图片：{result.selected_images}\n"
+                f"删除图片：{result.deleted_images}\n"
+                f"跳过：{result.skipped}\n\n"
+                "请返回项目首页重新扫描数据集，以刷新文件列表和统计。",
+            )
+            return
         QMessageBox.information(
             self, "数据预处理完成",
             f"输入图片：{result.input_images}\n符合范围：{result.selected_images}\n"
@@ -551,9 +651,19 @@ class PreprocessingPage(QWidget):
         QMessageBox.critical(self, "预处理失败", message)
 
     def _on_cancelled(self, result) -> None:
-        if self._operation is OperationType.LABEL_RENAME:
-            self._status.setText("当前状态：已取消，原始 JSON 未修改")
-            QMessageBox.information(self, "任务已取消", "原始 JSON 未修改。")
+        if self._operation in {
+            OperationType.LABEL_RENAME, OperationType.DELETE_UNANNOTATED,
+        }:
+            self._status.setText(
+                "当前状态：已取消，原始 JSON 未修改"
+                if self._operation is OperationType.LABEL_RENAME
+                else "当前状态：已取消，暂存图片已恢复"
+            )
+            message = (
+                "原始 JSON 未修改。" if self._operation is OperationType.LABEL_RENAME
+                else "删除已取消，暂存图片已恢复。"
+            )
+            QMessageBox.information(self, "任务已取消", message)
         else:
             self._status.setText("当前状态：已取消，临时输出已清理")
             QMessageBox.information(self, "任务已取消", "原始数据未修改，本次临时输出已清理。")
@@ -573,7 +683,9 @@ class PreprocessingPage(QWidget):
 
     def _update_enabled(self) -> None:
         output_ready = bool(
-            self._operation is OperationType.LABEL_RENAME
+            self._operation in {
+                OperationType.LABEL_RENAME, OperationType.DELETE_UNANNOTATED,
+            }
             or self._output.text().strip()
         )
         ready = bool(
