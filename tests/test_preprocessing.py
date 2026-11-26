@@ -81,11 +81,14 @@ class PreprocessingTests(unittest.TestCase):
             "D", str(self.source), str(self.source), str(self.source),
             TaskType.OBJECT_DETECTION,
         )
+        self.scanner = LabelMeDatasetScanner()
         ScanService(
-            self.repository, LabelMeDatasetScanner(), self.cache
+            self.repository, self.scanner, self.cache
         ).add_dataset(project.id, dataset)
         self.dataset_id = dataset.id
-        self.service = PreprocessingService(self.repository, self.cache)
+        self.service = PreprocessingService(
+            self.repository, self.cache, source_scanner=self.scanner
+        )
         self.output = self.base / "output"
 
     def tearDown(self) -> None:
@@ -147,13 +150,42 @@ class PreprocessingTests(unittest.TestCase):
         self.assertEqual(result.selected_images, 1)
         self.assertTrue((Path(result.output_directory) / "data" / "nested_r1c1.jpg").is_file())
 
-        outside = self.base / "outside"
-        outside.mkdir()
+        outside = self.base / "not_sibling" / "outside"
+        outside.mkdir(parents=True)
         with self.assertRaises(ValueError):
             self.service.preview(
                 self.project_id, self.dataset_id,
                 ProcessingScope.ALL_IMAGES, str(outside),
             )
+
+    def test_source_root_can_use_sibling_directory_with_temporary_scan(self) -> None:
+        sibling = self.base / "sibling_source"
+        sibling.mkdir()
+        image = sibling / "sibling.jpg"
+        annotation = sibling / "sibling.json"
+        Image.new("RGB", (100, 80), (4, 5, 6)).save(image)
+        write_label(annotation, image.name)
+
+        preview = self.service.preview(
+            self.project_id, self.dataset_id,
+            ProcessingScope.VALID_ANNOTATIONS, str(sibling),
+        )
+        self.assertEqual(preview.total_images, 1)
+        self.assertEqual(preview.valid_json, 1)
+
+        result = self.service.execute(ProcessingConfig(
+            self.project_id,
+            self.dataset_id,
+            str(self.output),
+            ProcessingScope.VALID_ANNOTATIONS,
+            OperationType.CROP,
+            source_root=str(sibling),
+            crop=CropConfig(rows=1, columns=1, keep_empty=True),
+        ))
+        self.assertEqual(result.input_images, 1)
+        self.assertTrue(
+            (Path(result.output_directory) / "data" / "sibling_r1c1.jpg").is_file()
+        )
 
     def test_preview_reuses_records_for_the_same_scan_snapshot(self) -> None:
         class CountingCache:

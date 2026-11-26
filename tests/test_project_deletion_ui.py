@@ -45,7 +45,7 @@ class ProjectDeletionUiTests(unittest.TestCase):
                 ScanService(repository, LabelMeDatasetScanner(parser), cache),
                 ImageService(repository, cache),
                 AnnotationService(parser, LabelMeAnnotationStore()),
-                PreprocessingService(repository, cache),
+                PreprocessingService(repository, cache, source_scanner=LabelMeDatasetScanner(parser)),
                 ModelTestService(repository, cache, object()),
             )
             operation_list = window._preprocessing._operation_list

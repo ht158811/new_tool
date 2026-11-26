@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from dataset_manager.application.ports.project_repository import ProjectRepository
 from dataset_manager.application.ports.scan_cache_reader import ScanCacheReader
+from dataset_manager.application.ports.dataset_scanner import DatasetScanner
 from dataset_manager.application.preprocessing.models import (
     OperationType, ProcessingConfig, ProcessingProgress, ProcessingResult,
     ProcessingRecord, ProcessingScope, ScopePreview,
@@ -26,6 +27,7 @@ from dataset_manager.infrastructure.preprocessing.crop_engine import CropEngine
 from dataset_manager.infrastructure.preprocessing.label_split_engine import LabelSplitEngine
 from dataset_manager.infrastructure.preprocessing.label_rename_engine import LabelRenameEngine
 from dataset_manager.infrastructure.storage.json_store import AtomicJsonStore
+from dataset_manager.domain.models.project import Dataset
 
 ProgressCallback = Callable[[ProcessingProgress], None]
 CancelCallback = Callable[[], bool]
@@ -42,6 +44,7 @@ class PreprocessingService:
         label_split_engine: LabelSplitEngine | None = None,
         label_rename_engine: LabelRenameEngine | None = None,
         json_store: AtomicJsonStore | None = None,
+        source_scanner: DatasetScanner | None = None,
     ) -> None:
         self._repository = repository
         self._cache = cache_reader
@@ -51,9 +54,13 @@ class PreprocessingService:
         self._label_split = label_split_engine or LabelSplitEngine()
         self._label_rename = label_rename_engine or LabelRenameEngine()
         self._json_store = json_store or AtomicJsonStore()
+        self._source_scanner = source_scanner
         self._record_cache_lock = threading.RLock()
         self._record_cache_key: tuple[str, str] | None = None
         self._record_cache: tuple[ProcessingRecord, ...] = ()
+        self._external_cache_key: tuple[str, int, str] | None = None
+        self._external_cache_records: tuple[ProcessingRecord, ...] = ()
+        self._external_cache_categories: tuple[str, ...] = ()
 
     def preview(
         self,
@@ -62,11 +69,11 @@ class PreprocessingService:
         scope: ProcessingScope,
         source_root: str | None = None,
     ) -> ScopePreview:
-        _, dataset, records = self._context(project_id, dataset_id)
+        project, dataset, records = self._context(project_id, dataset_id)
         if not dataset.active_scan_id:
             raise ValueError("数据集尚未完成完整扫描")
         selected_root = self._validate_source_root(source_root, dataset.root_path)
-        records = self._records_under_root(records, selected_root, dataset.root_path)
+        records, _ = self._source_records(project, dataset, records, selected_root)
         return build_preview(records, scope)
 
     def execute(
@@ -77,7 +84,9 @@ class PreprocessingService:
     ) -> ProcessingResult:
         project, dataset, records = self._context(config.project_id, config.dataset_id)
         source_root = self._validate_source_root(config.source_root, dataset.root_path)
-        records = self._records_under_root(records, source_root, dataset.root_path)
+        records, source_categories = self._source_records(
+            project, dataset, records, source_root
+        )
         if (
             config.operation in {OperationType.LABEL_SPLIT, OperationType.LABEL_RENAME}
             and config.scope is not ProcessingScope.VALID_ANNOTATIONS
@@ -98,7 +107,9 @@ class PreprocessingService:
         selected = self._assign_output_stems(selected_records)
         if not config.output_root.strip():
             raise ValueError("必须指定输出目录")
-        output_root = self._validate_output(Path(config.output_root), Path(dataset.root_path))
+        output_root = self._validate_output(
+            Path(config.output_root), Path(dataset.root_path), source_root
+        )
         final_directory = self._result_directory(
             output_root, config.operation, config.result_name
         )
@@ -113,7 +124,7 @@ class PreprocessingService:
         try:
             if config.operation is OperationType.CONVERSION:
                 self._execute_conversion(
-                    config, dataset, source_root, selected, temporary,
+                    config, dataset, source_root, source_categories, selected, temporary,
                     result, progress, cancelled,
                 )
             else:
@@ -163,6 +174,9 @@ class PreprocessingService:
         dataset = project.find_dataset(dataset_id)
         if not dataset.active_scan_id:
             raise ValueError("数据集尚未完成完整扫描，请先刷新数据集")
+        return project, dataset, self._cached_dataset_records(dataset)
+
+    def _cached_dataset_records(self, dataset) -> list[ProcessingRecord]:
         key = (dataset.id, dataset.active_scan_id)
         with self._record_cache_lock:
             if self._record_cache_key != key:
@@ -170,7 +184,7 @@ class PreprocessingService:
                 self._record_cache = tuple(records_from_cache(cache))
                 self._record_cache_key = key
             records = list(self._record_cache)
-        return project, dataset, records
+        return records
 
     def _execute_per_record(
         self, config, source_root, selected, temporary, result, progress, cancelled
@@ -219,7 +233,8 @@ class PreprocessingService:
             )
 
     def _execute_conversion(
-        self, config, dataset, source_root, selected, temporary, result, progress, cancelled
+        self, config, dataset, source_root, source_categories,
+        selected, temporary, result, progress, cancelled
     ) -> None:
         if cancelled():
             raise _Cancelled
@@ -235,7 +250,7 @@ class PreprocessingService:
                 str(source_root),
                 temporary,
                 dataset.task_type,
-                dataset.scan_summary.categories,
+                source_categories,
                 config.conversion,
                 cancelled,
                 report,
@@ -427,6 +442,51 @@ class PreprocessingService:
             for record in records
         ]
 
+    def _source_records(
+        self, project, dataset, dataset_records, source_root: Path
+    ) -> tuple[list[ProcessingRecord], list[str]]:
+        selected = source_root.resolve()
+        dataset_root = Path(dataset.root_path).expanduser().resolve()
+        if selected == dataset_root or selected.is_relative_to(dataset_root):
+            return (
+                self._records_under_root(
+                    dataset_records, source_root, dataset.root_path
+                ),
+                list(dataset.scan_summary.categories),
+            )
+        for candidate in project.datasets:
+            if (
+                candidate.active_scan_id
+                and Path(candidate.root_path).expanduser().resolve() == selected
+            ):
+                return (
+                    self._cached_dataset_records(candidate),
+                    list(candidate.scan_summary.categories),
+                )
+        if self._source_scanner is None:
+            raise ValueError("同级目录需要临时扫描，但当前未配置目录扫描器")
+        key = (
+            os.path.normcase(str(selected)),
+            selected.stat().st_mtime_ns,
+            dataset.task_type.value,
+        )
+        with self._record_cache_lock:
+            if self._external_cache_key != key:
+                temporary_dataset = Dataset.create(
+                    selected.name, str(selected), str(selected), str(selected),
+                    dataset.task_type,
+                )
+                scan_result = self._source_scanner.scan(temporary_dataset)
+                self._external_cache_records = tuple(
+                    records_from_cache(scan_result.to_dict())
+                )
+                self._external_cache_categories = tuple(scan_result.categories)
+                self._external_cache_key = key
+            return (
+                list(self._external_cache_records),
+                list(self._external_cache_categories),
+            )
+
     @staticmethod
     def _validate_source_root(source_root: str | None, dataset_root: str) -> Path:
         dataset_path = Path(dataset_root).expanduser().absolute()
@@ -439,8 +499,10 @@ class PreprocessingService:
         selected = selected_path.resolve()
         if not selected.is_dir():
             raise ValueError(f"处理根目录不存在或不是文件夹：{selected_path}")
-        if selected != dataset and not selected.is_relative_to(dataset):
-            raise ValueError("处理根目录只能选择数据集根目录或其子目录")
+        is_dataset_path = selected == dataset or selected.is_relative_to(dataset)
+        is_sibling = selected.parent == dataset.parent
+        if not is_dataset_path and not is_sibling:
+            raise ValueError("处理根目录只能选择数据集根目录、其子目录或同级目录")
         return selected_path
 
     @staticmethod
@@ -460,13 +522,14 @@ class PreprocessingService:
         ]
 
     @staticmethod
-    def _validate_output(output_root: Path, source_root: Path) -> Path:
+    def _validate_output(output_root: Path, *source_roots: Path) -> Path:
         if not str(output_root).strip():
             raise ValueError("必须指定输出目录")
         output = output_root.expanduser().resolve()
-        source = source_root.expanduser().resolve()
-        if output == source or output.is_relative_to(source):
-            raise ValueError("输出目录不能是原始数据集目录或其子目录")
+        for source_root in source_roots:
+            source = source_root.expanduser().resolve()
+            if output == source or output.is_relative_to(source):
+                raise ValueError("输出目录不能是处理数据目录或其子目录")
         output.mkdir(parents=True, exist_ok=True)
         try:
             with tempfile.NamedTemporaryFile(dir=output, prefix=".write_test_", delete=True):

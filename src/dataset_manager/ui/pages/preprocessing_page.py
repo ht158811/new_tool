@@ -250,9 +250,15 @@ class PreprocessingPage(QWidget):
             return
         resolved = Path(selected).resolve()
         default = Path(self._default_source_root).resolve() if self._default_source_root else None
-        if default is None or (resolved != default and not resolved.is_relative_to(default)):
+        is_dataset_path = (
+            default is not None
+            and (resolved == default or resolved.is_relative_to(default))
+        )
+        is_sibling = default is not None and resolved.parent == default.parent
+        if not is_dataset_path and not is_sibling:
             QMessageBox.warning(
-                self, "目录不在数据集中", "只能选择当前数据集根目录或其子目录。"
+                self, "目录范围无效",
+                "只能选择当前数据集根目录、其子目录或同级目录。",
             )
             return
         self._source_root.setText(str(resolved))

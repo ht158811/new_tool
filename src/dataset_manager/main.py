@@ -40,7 +40,9 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Dataset Manager")
     dataset_service = DatasetService(repository, cache_store)
-    preprocessing_service = PreprocessingService(repository, cache_store)
+    preprocessing_service = PreprocessingService(
+        repository, cache_store, source_scanner=scanner
+    )
     model_test_service = ModelTestService(repository, cache_store, UltralyticsRunner())
     window = MainWindow(
         service, dataset_service, scan_service, image_service, annotation_service,
