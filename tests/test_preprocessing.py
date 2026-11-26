@@ -114,6 +114,67 @@ class PreprocessingTests(unittest.TestCase):
         self.assertEqual(missing.selected_total, 1)
         self.assertEqual(all_images.selected_total, 3)
 
+    def test_source_root_defaults_to_dataset_and_can_limit_processing_to_subfolder(self) -> None:
+        nested = self.source / "selected_subfolder"
+        nested.mkdir()
+        nested_image = nested / "nested.jpg"
+        nested_json = nested / "nested.json"
+        Image.new("RGB", (100, 80), (1, 2, 3)).save(nested_image)
+        write_label(nested_json, nested_image.name)
+        ScanService(
+            self.repository, LabelMeDatasetScanner(), self.cache
+        ).refresh_dataset(self.project_id, self.dataset_id)
+
+        default_preview = self.service.preview(
+            self.project_id, self.dataset_id, ProcessingScope.ALL_IMAGES
+        )
+        nested_preview = self.service.preview(
+            self.project_id, self.dataset_id, ProcessingScope.ALL_IMAGES, str(nested)
+        )
+        self.assertEqual(default_preview.total_images, 4)
+        self.assertEqual(nested_preview.total_images, 1)
+
+        result = self.service.execute(ProcessingConfig(
+            self.project_id,
+            self.dataset_id,
+            str(self.output),
+            ProcessingScope.VALID_ANNOTATIONS,
+            OperationType.CROP,
+            source_root=str(nested),
+            crop=CropConfig(rows=1, columns=1, keep_empty=True),
+        ))
+        self.assertEqual(result.input_images, 1)
+        self.assertEqual(result.selected_images, 1)
+        self.assertTrue((Path(result.output_directory) / "data" / "nested_r1c1.jpg").is_file())
+
+        outside = self.base / "outside"
+        outside.mkdir()
+        with self.assertRaises(ValueError):
+            self.service.preview(
+                self.project_id, self.dataset_id,
+                ProcessingScope.ALL_IMAGES, str(outside),
+            )
+
+    def test_preview_reuses_records_for_the_same_scan_snapshot(self) -> None:
+        class CountingCache:
+            def __init__(self, delegate) -> None:
+                self.delegate = delegate
+                self.read_count = 0
+
+            def read(self, dataset_id: str, scan_id: str):
+                self.read_count += 1
+                return self.delegate.read(dataset_id, scan_id)
+
+        counting_cache = CountingCache(self.cache)
+        service = PreprocessingService(self.repository, counting_cache)
+        service.preview(
+            self.project_id, self.dataset_id, ProcessingScope.VALID_ANNOTATIONS
+        )
+        service.preview(
+            self.project_id, self.dataset_id, ProcessingScope.ALL_IMAGES
+        )
+        self.assertEqual(counting_cache.read_count, 1)
+
     def test_crop_preserves_sources_and_clips_rectangle_and_polygon(self) -> None:
         before_image, before_json = digest(self.valid_image), digest(self.valid_json)
         result = self.service.execute(self.config(

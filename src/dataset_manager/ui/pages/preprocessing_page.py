@@ -34,6 +34,8 @@ class PreprocessingPage(QWidget):
         self._operation: OperationType | None = None
         self._worker: PreprocessingWorker | None = None
         self._dataset_ready = False
+        self._default_source_root: str | None = None
+        self._loaded_scan_id: str | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -51,7 +53,21 @@ class PreprocessingPage(QWidget):
         dataset_grid = QGridLayout(dataset_box)
         self._dataset_info = QLabel("请先在项目首页选择数据集")
         self._dataset_info.setWordWrap(True)
-        dataset_grid.addWidget(self._dataset_info, 0, 0)
+        dataset_grid.addWidget(self._dataset_info, 0, 0, 1, 4)
+        self._source_root = QLineEdit()
+        self._source_root.setPlaceholderText("默认使用数据集根目录，也可浏览选择其子目录")
+        self._source_root.editingFinished.connect(self._source_root_changed)
+        self._source_browse = QPushButton("浏览…")
+        self._source_browse.clicked.connect(self._browse_source_root)
+        self._source_default = QPushButton("默认目录")
+        self._source_default.clicked.connect(self._restore_default_source_root)
+        dataset_grid.addWidget(QLabel("根目录"), 1, 0)
+        dataset_grid.addWidget(self._source_root, 1, 1)
+        dataset_grid.addWidget(self._source_browse, 1, 2)
+        dataset_grid.addWidget(self._source_default, 1, 3)
+        self._source_root.setEnabled(False)
+        self._source_browse.setEnabled(False)
+        self._source_default.setEnabled(False)
         root.addWidget(dataset_box)
 
         self._output_box = QGroupBox("输出目录（强制）")
@@ -89,7 +105,7 @@ class PreprocessingPage(QWidget):
             radio = QRadioButton(text)
             self._scope_group.addButton(radio)
             self._scope_radios[scope] = radio
-            radio.toggled.connect(self._refresh_preview)
+            radio.toggled.connect(self._scope_changed)
             scope_layout.addWidget(radio)
         self._scope_radios[ProcessingScope.VALID_ANNOTATIONS].setChecked(True)
         self._preview = QLabel("尚未选择数据集")
@@ -170,9 +186,15 @@ class PreprocessingPage(QWidget):
         self._update_enabled()
 
     def set_dataset(self, project_id: str | None, dataset_id: str | None) -> None:
-        self._project_id, self._dataset_id = project_id, dataset_id
-        self._dataset_ready = False
         if not project_id or not dataset_id:
+            self._project_id, self._dataset_id = project_id, dataset_id
+            self._dataset_ready = False
+            self._default_source_root = None
+            self._loaded_scan_id = None
+            self._source_root.clear()
+            self._source_root.setEnabled(False)
+            self._source_browse.setEnabled(False)
+            self._source_default.setEnabled(False)
             self._dataset_info.setText("请先返回项目首页选择一个数据集。")
             self._preview.setText("尚未选择数据集")
             self._update_enabled()
@@ -183,6 +205,16 @@ class PreprocessingPage(QWidget):
         except KeyError:
             self.set_dataset(None, None)
             return
+        if (
+            self._project_id == project_id
+            and self._dataset_id == dataset_id
+            and self._loaded_scan_id == dataset.active_scan_id
+            and self._source_root.text().strip()
+        ):
+            self._dataset_ready = bool(dataset.active_scan_id)
+            self._update_enabled()
+            return
+        self._project_id, self._dataset_id = project_id, dataset_id
         task_names = {
             TaskType.OBJECT_DETECTION: "目标检测",
             TaskType.IMAGE_CLASSIFICATION: "图像分类",
@@ -190,15 +222,48 @@ class PreprocessingPage(QWidget):
         }
         scan_status = "已完成" if dataset.active_scan_id else "未完成"
         self._dataset_ready = bool(dataset.active_scan_id)
+        self._loaded_scan_id = dataset.active_scan_id
+        self._default_source_root = str(Path(dataset.root_path).resolve())
+        self._source_root.setText(self._default_source_root)
+        self._source_root.setEnabled(True)
+        self._source_browse.setEnabled(True)
+        self._source_default.setEnabled(True)
         self._dataset_info.setText(
             f"项目名称：{project.name}    数据集名称：{dataset.name}\n"
             f"任务类型：{task_names[dataset.task_type]}    数据格式：LabelMe JSON    "
             f"扫描状态：{scan_status}\n"
-            f"根目录：{dataset.root_path}\n"
             f"图片：{dataset.scan_summary.image_count}    "
             f"标注：{dataset.scan_summary.annotation_count}    "
             f"有效标注图片：{dataset.scan_summary.valid_annotation_image_count}"
         )
+        self._refresh_preview()
+        self._update_enabled()
+
+    def _scope_changed(self, checked: bool) -> None:
+        if checked:
+            self._refresh_preview()
+
+    def _browse_source_root(self) -> None:
+        initial = self._source_root.text().strip() or self._default_source_root or ""
+        selected = QFileDialog.getExistingDirectory(self, "选择处理根目录", initial)
+        if not selected:
+            return
+        resolved = Path(selected).resolve()
+        default = Path(self._default_source_root).resolve() if self._default_source_root else None
+        if default is None or (resolved != default and not resolved.is_relative_to(default)):
+            QMessageBox.warning(
+                self, "目录不在数据集中", "只能选择当前数据集根目录或其子目录。"
+            )
+            return
+        self._source_root.setText(str(resolved))
+        self._source_root_changed()
+
+    def _restore_default_source_root(self) -> None:
+        if self._default_source_root:
+            self._source_root.setText(self._default_source_root)
+            self._source_root_changed()
+
+    def _source_root_changed(self) -> None:
         self._refresh_preview()
         self._update_enabled()
 
@@ -450,7 +515,10 @@ class PreprocessingPage(QWidget):
             return
         try:
             preview = self._service.preview(
-                self._project_id, self._dataset_id, self._selected_scope()
+                self._project_id,
+                self._dataset_id,
+                self._selected_scope(),
+                self._source_root.text().strip(),
             )
         except (OSError, KeyError, ValueError) as error:
             self._preview.setText(str(error))
@@ -480,6 +548,7 @@ class PreprocessingPage(QWidget):
             scope=self._selected_scope(),
             operation=self._operation,
             result_name=self._result_name.text(),
+            source_root=self._source_root.text().strip(),
         )
         if self._operation is OperationType.CROP:
             return ProcessingConfig(**common, crop=CropConfig(
@@ -535,7 +604,9 @@ class PreprocessingPage(QWidget):
     def _start_processing(self) -> None:
         try:
             config = self._build_config()
-            preview = self._service.preview(config.project_id, config.dataset_id, config.scope)
+            preview = self._service.preview(
+                config.project_id, config.dataset_id, config.scope, config.source_root
+            )
         except (OSError, KeyError, ValueError) as error:
             QMessageBox.warning(self, "无法开始处理", str(error))
             return
@@ -555,7 +626,7 @@ class PreprocessingPage(QWidget):
                 return
             if config.operation is OperationType.LABEL_RENAME:
                 confirmation = (
-                    f"数据集：{dataset.name}\n原数据目录：{dataset.root_path}\n"
+                    f"数据集：{dataset.name}\n处理根目录：{config.source_root}\n"
                     f"精确标签：{config.label_rename.source_label} → "
                     f"{config.label_rename.target_label}\n"
                     f"预计检查：{preview.selected_total} 张图片\n\n"
@@ -565,7 +636,7 @@ class PreprocessingPage(QWidget):
                 title = "确认直接修改原始 JSON"
             else:
                 confirmation = (
-                    f"数据集：{dataset.name}\n原数据目录：{dataset.root_path}\n"
+                    f"数据集：{dataset.name}\n处理根目录：{config.source_root}\n"
                     f"预计删除：{preview.selected_total} 张无 JSON 图片\n\n"
                     "此操作会在原文件夹中永久删除图片，不创建输出副本。"
                     "执行时会再次复核 JSON 关联，是否继续？"
@@ -574,6 +645,7 @@ class PreprocessingPage(QWidget):
         else:
             confirmation = (
                 f"数据集 ID：{config.dataset_id}\n处理功能：{config.operation.value}\n"
+                f"处理根目录：{config.source_root}\n"
                 f"预计处理：{preview.selected_total} 张图片\n"
                 f"输出根目录：{config.output_root}\n\n是否继续？"
             )
@@ -692,6 +764,7 @@ class PreprocessingPage(QWidget):
             self._project_id
             and self._dataset_id
             and self._dataset_ready
+            and self._source_root.text().strip()
             and self._operation
             and output_ready
         )

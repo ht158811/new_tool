@@ -141,6 +141,7 @@ class ProcessingConfig:
     scope: ProcessingScope
     operation: OperationType
     result_name: str | None = None
+    source_root: str | None = None
     crop: CropConfig | None = None
     augmentation: AugmentationConfig | None = None
     label_split: LabelSplitConfig | None = None

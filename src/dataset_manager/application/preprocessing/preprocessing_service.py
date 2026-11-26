@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
@@ -50,13 +51,22 @@ class PreprocessingService:
         self._label_split = label_split_engine or LabelSplitEngine()
         self._label_rename = label_rename_engine or LabelRenameEngine()
         self._json_store = json_store or AtomicJsonStore()
+        self._record_cache_lock = threading.RLock()
+        self._record_cache_key: tuple[str, str] | None = None
+        self._record_cache: tuple[ProcessingRecord, ...] = ()
 
     def preview(
-        self, project_id: str, dataset_id: str, scope: ProcessingScope
+        self,
+        project_id: str,
+        dataset_id: str,
+        scope: ProcessingScope,
+        source_root: str | None = None,
     ) -> ScopePreview:
         _, dataset, records = self._context(project_id, dataset_id)
         if not dataset.active_scan_id:
             raise ValueError("数据集尚未完成完整扫描")
+        selected_root = self._validate_source_root(source_root, dataset.root_path)
+        records = self._records_under_root(records, selected_root, dataset.root_path)
         return build_preview(records, scope)
 
     def execute(
@@ -66,6 +76,8 @@ class PreprocessingService:
         is_cancelled: CancelCallback | None = None,
     ) -> ProcessingResult:
         project, dataset, records = self._context(config.project_id, config.dataset_id)
+        source_root = self._validate_source_root(config.source_root, dataset.root_path)
+        records = self._records_under_root(records, source_root, dataset.root_path)
         if (
             config.operation in {OperationType.LABEL_SPLIT, OperationType.LABEL_RENAME}
             and config.scope is not ProcessingScope.VALID_ANNOTATIONS
@@ -75,13 +87,13 @@ class PreprocessingService:
         cancelled = is_cancelled or (lambda: False)
         if config.operation is OperationType.LABEL_RENAME:
             return self._execute_label_rename_in_place(
-                config, dataset, records, selected_records, progress, cancelled
+                config, source_root, records, selected_records, progress, cancelled
             )
         if config.operation is OperationType.DELETE_UNANNOTATED:
             if config.scope is not ProcessingScope.WITHOUT_JSON:
                 raise ValueError("删除无 JSON 图片仅支持‘没有对应 JSON 的图片’范围")
             return self._execute_delete_unannotated_in_place(
-                dataset, records, selected_records, progress, cancelled
+                source_root, records, selected_records, progress, cancelled
             )
         selected = self._assign_output_stems(selected_records)
         if not config.output_root.strip():
@@ -100,9 +112,15 @@ class PreprocessingService:
         )
         try:
             if config.operation is OperationType.CONVERSION:
-                self._execute_conversion(config, dataset, selected, temporary, result, progress, cancelled)
+                self._execute_conversion(
+                    config, dataset, source_root, selected, temporary,
+                    result, progress, cancelled,
+                )
             else:
-                self._execute_per_record(config, dataset, selected, temporary, result, progress, cancelled)
+                self._execute_per_record(
+                    config, source_root, selected, temporary,
+                    result, progress, cancelled,
+                )
             if cancelled():
                 result.cancelled = True
                 raise _Cancelled
@@ -145,11 +163,17 @@ class PreprocessingService:
         dataset = project.find_dataset(dataset_id)
         if not dataset.active_scan_id:
             raise ValueError("数据集尚未完成完整扫描，请先刷新数据集")
-        cache = self._cache.read(dataset.id, dataset.active_scan_id)
-        return project, dataset, records_from_cache(cache)
+        key = (dataset.id, dataset.active_scan_id)
+        with self._record_cache_lock:
+            if self._record_cache_key != key:
+                cache = self._cache.read(dataset.id, dataset.active_scan_id)
+                self._record_cache = tuple(records_from_cache(cache))
+                self._record_cache_key = key
+            records = list(self._record_cache)
+        return project, dataset, records
 
     def _execute_per_record(
-        self, config, dataset, selected, temporary, result, progress, cancelled
+        self, config, source_root, selected, temporary, result, progress, cancelled
     ) -> None:
         for index, record in enumerate(selected, start=1):
             if cancelled():
@@ -159,19 +183,19 @@ class PreprocessingService:
                     if config.crop is None:
                         raise ValueError("缺少裁剪配置")
                     generated_images, generated_json, extra_skipped = self._crop.process(
-                        record, dataset.root_path, temporary, config.crop, cancelled
+                        record, str(source_root), temporary, config.crop, cancelled
                     )
                 elif config.operation is OperationType.AUGMENTATION:
                     if config.augmentation is None:
                         raise ValueError("缺少增强配置")
                     generated_images, generated_json, extra_skipped = self._augmentation.process(
-                        record, dataset.root_path, temporary, config.augmentation, cancelled
+                        record, str(source_root), temporary, config.augmentation, cancelled
                     )
                 elif config.operation is OperationType.LABEL_SPLIT:
                     if config.label_split is None:
                         raise ValueError("缺少标签分割配置")
                     generated_images, generated_json, extra_skipped = self._label_split.process(
-                        record, dataset.root_path, temporary, config.label_split, cancelled
+                        record, str(source_root), temporary, config.label_split, cancelled
                     )
                 else:
                     raise ValueError(f"未知处理类型: {config.operation}")
@@ -195,7 +219,7 @@ class PreprocessingService:
             )
 
     def _execute_conversion(
-        self, config, dataset, selected, temporary, result, progress, cancelled
+        self, config, dataset, source_root, selected, temporary, result, progress, cancelled
     ) -> None:
         if cancelled():
             raise _Cancelled
@@ -208,7 +232,7 @@ class PreprocessingService:
         try:
             generated_images, generated_annotations, warnings = self._conversion.process_all(
                 selected,
-                dataset.root_path,
+                str(source_root),
                 temporary,
                 dataset.task_type,
                 dataset.scan_summary.categories,
@@ -225,12 +249,12 @@ class PreprocessingService:
         self._emit(progress, len(selected), len(selected), result, "格式转换", "处理中")
 
     def _execute_label_rename_in_place(
-        self, config, dataset, records, selected, progress, cancelled
+        self, config, source_root, records, selected, progress, cancelled
     ) -> ProcessingResult:
         if config.label_rename is None:
             raise ValueError("缺少批量标签重命名配置")
         result = ProcessingResult(
-            output_directory=dataset.root_path,
+            output_directory=str(source_root),
             input_images=len(records),
             selected_images=len(selected),
             skipped=len(records) - len(selected),
@@ -260,10 +284,10 @@ class PreprocessingService:
         return result
 
     def _execute_delete_unannotated_in_place(
-        self, dataset, records, selected, progress, cancelled
+        self, source_root, records, selected, progress, cancelled
     ) -> ProcessingResult:
         """Transactionally remove images that still have no colocated LabelMe JSON."""
-        root = Path(dataset.root_path).expanduser().resolve()
+        root = Path(source_root).expanduser().resolve()
         result = ProcessingResult(
             output_directory=str(root),
             input_images=len(records),
@@ -401,6 +425,38 @@ class PreprocessingService:
                 output_stem=names[str(Path(record.image_path).resolve()).casefold()],
             )
             for record in records
+        ]
+
+    @staticmethod
+    def _validate_source_root(source_root: str | None, dataset_root: str) -> Path:
+        dataset_path = Path(dataset_root).expanduser().absolute()
+        selected_path = (
+            Path(source_root).expanduser().absolute()
+            if source_root is not None and source_root.strip()
+            else dataset_path
+        )
+        dataset = dataset_path.resolve()
+        selected = selected_path.resolve()
+        if not selected.is_dir():
+            raise ValueError(f"处理根目录不存在或不是文件夹：{selected_path}")
+        if selected != dataset and not selected.is_relative_to(dataset):
+            raise ValueError("处理根目录只能选择数据集根目录或其子目录")
+        return selected_path
+
+    @staticmethod
+    def _records_under_root(
+        records: list[ProcessingRecord], source_root: Path, dataset_root: str
+    ) -> list[ProcessingRecord]:
+        resolved_root = source_root.resolve()
+        if resolved_root == Path(dataset_root).expanduser().resolve():
+            return list(records)
+        normalized_root = os.path.normcase(os.path.normpath(str(resolved_root)))
+        prefix = normalized_root.rstrip("\\/") + os.sep
+        return [
+            record for record in records
+            if os.path.normcase(
+                os.path.normpath(os.path.abspath(os.path.expanduser(record.image_path)))
+            ).startswith(prefix)
         ]
 
     @staticmethod

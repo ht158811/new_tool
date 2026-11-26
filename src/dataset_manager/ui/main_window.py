@@ -67,7 +67,6 @@ class MainWindow(QMainWindow):
         self._home.delete_dataset_requested.connect(self._delete_dataset)
         self._home.add_dataset_requested.connect(self._add_dataset)
         self._home.refresh_dataset_requested.connect(self._refresh_dataset)
-        self._home.dataset_selection_changed.connect(self._set_preprocessing_dataset)
         self._home.dataset_order_changed.connect(self._reorder_datasets)
         self._stack.addWidget(self._home)
         self._image_browser = ImageBrowserPage(
@@ -125,9 +124,6 @@ class MainWindow(QMainWindow):
     def _toggle_theme(self) -> None:
         self._theme = Theme.DARK if self._theme is Theme.LIGHT else Theme.LIGHT
         self.setStyleSheet(stylesheet(self._theme))
-
-    def _set_preprocessing_dataset(self, project_id: str, dataset_id: str) -> None:
-        self._preprocessing.set_dataset(project_id, dataset_id)
 
     def _open_preprocessing(self, checked: bool = False) -> None:
         del checked
