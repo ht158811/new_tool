@@ -82,22 +82,119 @@ function Get-FileSha256([string]$Path) {
 function Get-DependencyState {
     $requirementsHash = Get-FileSha256 $requirements
     $projectHash = Get-FileSha256 $projectFile
-    return "$requirementsHash`n$projectHash"
+    return "$requirementsHash`n$projectHash`n$script:TorchBackend"
+}
+
+function Get-TorchBackend {
+    $override = $env:DATASET_MANAGER_TORCH_BACKEND
+    if ($override) {
+        $normalized = $override.Trim().ToLowerInvariant()
+        if ($normalized -notin @("cpu", "cu128", "cu132")) {
+            throw "DATASET_MANAGER_TORCH_BACKEND must be cpu, cu128, or cu132."
+        }
+        return $normalized
+    }
+
+    $nvidiaSmi = Get-Command "nvidia-smi.exe" -ErrorAction SilentlyContinue
+    if ($null -eq $nvidiaSmi) {
+        return "cpu"
+    }
+    try {
+        $smiOutput = (& $nvidiaSmi.Source 2>$null) -join "`n"
+        if ($LASTEXITCODE -ne 0) {
+            return "cpu"
+        }
+        $match = [regex]::Match(
+            $smiOutput,
+            "CUDA(?: UMD)? Version:\s*(\d+)\.(\d+)",
+            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+        if (-not $match.Success) {
+            Write-Warning "NVIDIA GPU detected, but the supported CUDA version could not be read. Using CPU PyTorch."
+            return "cpu"
+        }
+        $cudaVersion = [version]::new(
+            [int]$match.Groups[1].Value,
+            [int]$match.Groups[2].Value
+        )
+        if ($cudaVersion -ge [version]"13.2") {
+            return "cu132"
+        }
+        if ($cudaVersion -ge [version]"12.8") {
+            return "cu128"
+        }
+        Write-Warning "NVIDIA driver supports CUDA $cudaVersion, below the packaged CUDA 12.8 runtime. Using CPU PyTorch."
+        return "cpu"
+    }
+    catch {
+        Write-Warning "NVIDIA detection failed: $($_.Exception.Message). Using CPU PyTorch."
+        return "cpu"
+    }
+}
+
+function Install-TorchBackend([string]$Backend) {
+    Write-Host "[2/4] Synchronizing PyTorch backend: $Backend..."
+    switch ($Backend) {
+        "cu132" {
+            Invoke-Python $venvPython @(
+                "-m", "pip", "install", "--disable-pip-version-check", "--upgrade",
+                "torch==2.15.0+cu132", "torchvision==0.29.2+cu132",
+                "--index-url", "https://download.pytorch.org/whl/cu132"
+            )
+        }
+        "cu128" {
+            Invoke-Python $venvPython @(
+                "-m", "pip", "install", "--disable-pip-version-check", "--upgrade",
+                "torch==2.11.0+cu128", "torchvision==0.26.0+cu128",
+                "--index-url", "https://download.pytorch.org/whl/cu128"
+            )
+        }
+        default {
+            Invoke-Python $venvPython @(
+                "-m", "pip", "install", "--disable-pip-version-check", "--upgrade",
+                "torch==2.15.0", "torchvision==0.29.2",
+                "--index-url", "https://download.pytorch.org/whl/cpu"
+            )
+        }
+    }
+}
+
+function Test-TorchBackend([string]$Backend) {
+    $details = & $venvPython -c (
+        "import torch; " +
+        "print(torch.__version__); " +
+        "print(torch.version.cuda or 'none'); " +
+        "print(int(torch.cuda.is_available())); " +
+        "print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw "PyTorch backend verification failed."
+    }
+    $lines = @($details)
+    if ($lines.Count -lt 4) {
+        throw "PyTorch backend verification returned incomplete information."
+    }
+    Write-Host "[4/4] PyTorch $($lines[0]); CUDA runtime $($lines[1]); device $($lines[3])"
+    if ($Backend -ne "cpu" -and $lines[2].Trim() -ne "1") {
+        throw "CUDA PyTorch was installed, but torch.cuda.is_available() is False. Update the NVIDIA driver or set DATASET_MANAGER_TORCH_BACKEND=cpu."
+    }
 }
 
 Write-Host "[Dataset Manager] Project: $projectRoot"
+$script:TorchBackend = Get-TorchBackend
+Write-Host "[Dataset Manager] Compute backend: $script:TorchBackend"
 
 if (-not (Test-Path -LiteralPath $venvPython)) {
     $basePython = Find-BasePython
     $version = & $basePython --version
-    Write-Host "[1/3] Creating the local environment with $version..."
+    Write-Host "[1/4] Creating the local environment with $version..."
     Invoke-Python $basePython @("-m", "venv", $venvRoot)
 }
 elseif (-not (Test-SupportedPython $venvPython)) {
     throw "The Python version in .venv is unsupported. Delete .venv and run setup_environment.bat again."
 }
 else {
-    Write-Host "[1/3] Reusing local environment: $venvRoot"
+    Write-Host "[1/4] Reusing local environment: $venvRoot"
 }
 
 $expectedState = Get-DependencyState
@@ -108,7 +205,8 @@ $currentState = if (Test-Path -LiteralPath $stateFile) {
 }
 
 if ($ForceInstall -or $currentState -ne $expectedState.TrimEnd()) {
-    Write-Host "[2/3] Installing or synchronizing dependencies (the first run needs network access)..."
+    Install-TorchBackend $script:TorchBackend
+    Write-Host "[3/4] Installing or synchronizing application dependencies..."
     Invoke-Python $venvPython @(
         "-m", "pip", "install", "--disable-pip-version-check",
         "-r", $requirements
@@ -117,19 +215,21 @@ if ($ForceInstall -or $currentState -ne $expectedState.TrimEnd()) {
         "-m", "pip", "install", "--disable-pip-version-check",
         "--no-deps", "--editable", $projectRoot
     )
+    Test-TorchBackend $script:TorchBackend
     [System.IO.File]::WriteAllText($stateFile, $expectedState, [System.Text.UTF8Encoding]::new($false))
-    Write-Host "[2/3] Dependencies are ready."
+    Write-Host "[Dataset Manager] Dependencies are ready."
 }
 else {
-    Write-Host "[2/3] Dependencies are unchanged; installation skipped."
+    Write-Host "[2/4] Dependencies are unchanged; installation skipped."
+    Test-TorchBackend $script:TorchBackend
 }
 
 if ($SetupOnly) {
-    Write-Host "[3/3] Environment setup completed."
+    Write-Host "[Dataset Manager] Environment setup completed."
     exit 0
 }
 
-Write-Host "[3/3] Starting Dataset Manager..."
+Write-Host "[Dataset Manager] Starting Dataset Manager..."
 Push-Location $projectRoot
 try {
     Invoke-Python $venvPython @("-m", "dataset_manager")

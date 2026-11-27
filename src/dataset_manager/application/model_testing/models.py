@@ -42,3 +42,4 @@ class ModelTestResult:
     generated_annotations: int
     skipped_existing: int
     cancelled: bool = False
+    failure_messages: tuple[str, ...] = ()

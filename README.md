@@ -30,18 +30,29 @@
 
 “选择处理功能”区域支持鼠标拖动功能项调整显示顺序，拖动只改变界面排列，不会串联或自动执行功能。
 
-原“数据统计”入口已替换为“模型测试”。页面支持选择已扫描的数据集、Ultralytics YOLO 检测/实例分割模型、模型输入宽高、置信度、IoU、最大目标数和运行设备。模型会逐图推理，并在原图片旁生成同名的标准 LabelMe JSON；默认跳过已有标注，也可以明确选择覆盖。任务中途取消不会写入本次预测，批量写入失败时会回滚已写文件，原图片始终不会被修改。完成后重新扫描数据集即可刷新有效标注数量和类别。
+原“数据统计”入口已替换为“模型测试”。页面支持选择已扫描的数据集、Ultralytics YOLO 检测/实例分割模型、模型输入宽高、置信度、IoU、最大目标数和运行设备。项目环境开箱支持 `.pt` 和 TorchScript，ONNX/TensorRT 会在加载阶段检查对应的 `onnxruntime`/`tensorrt` 后端并明确提示缺失依赖。运行设备留空时由 Ultralytics 自动选择；CPU 环境可明确输入 `cpu`，CUDA 可用时可填写 `0`、`1` 或 `0,1`，无效 GPU 配置会在模型加载阶段直接给出错误。模型会逐图推理，并在原图片旁生成同名的标准 LabelMe JSON；预测坐标会校验、排序并限制在原图边界内，无效分割轮廓自动回退为检测框。默认跳过已有标注，也可以明确选择覆盖；全部图片已有 JSON 时不会加载模型。任务中途取消不会写入本次预测，批量写入失败时会回滚已写文件，原图片始终不会被修改。部分图片失败时结果页显示具体原因，全部图片失败或连续出现相同后端错误时会停止任务并明确报错。完成后重新扫描数据集即可刷新有效标注数量和类别。
 
 ## 克隆后直接运行（Windows）
 
 电脑只需预先安装一次 64 位 Python 3.10–3.13，推荐 Python 3.12。克隆仓库后：
 
 1. 双击根目录的 `run.bat`。
-2. 首次运行会自动在项目内创建 `.venv` 并安装依赖，需要能够访问 Python 软件包源。
+2. 首次运行会自动在项目内创建 `.venv`、检测 NVIDIA 驱动支持的 CUDA 版本，并安装对应的 CUDA PyTorch；没有兼容 NVIDIA GPU 时自动安装 CPU 版。首次下载 CUDA 运行库所需时间和磁盘空间较多，需要能够访问 Python 软件包源。
 3. 安装完成后软件自动启动；以后双击 `run.bat` 会直接复用环境。
 4. 当 `pyproject.toml` 或 `requirements-runtime.txt` 发生变化时，启动器会自动重新同步依赖。
 
 如果只想提前安装环境而不启动软件，可双击 `setup_environment.bat`。`.venv`、运行数据和缓存均已加入 Git 忽略列表，不会污染代码仓库。
+
+请不要直接运行其他 Python/Conda 环境中注册的 `dataset-manager` 命令；该命令可能指向全局解释器，无法使用项目 `.venv` 中的 Ultralytics。模型测试页会显示当前 Python 解释器和推理后端状态。正常启动方式始终是双击项目根目录的 `run.bat`，或执行 `.venv\Scripts\python.exe -m dataset_manager`。
+
+启动器当前支持 `cu132`、`cu128` 和 `cpu` 三种 PyTorch 后端，默认根据 `nvidia-smi` 自动选择。需要手动指定时，可在 PowerShell 中设置环境变量后重新同步：
+
+```powershell
+$env:DATASET_MANAGER_TORCH_BACKEND = "cu132"  # 也可填写 cu128 或 cpu
+.\scripts\bootstrap.ps1 -SetupOnly -ForceInstall
+```
+
+CUDA 版 PyTorch 自带所需 CUDA 运行库，通常不需要另外安装完整 CUDA Toolkit，但必须保留可用的 NVIDIA 显卡驱动。切换后端会被启动器识别并自动重新同步，不会继续误用旧的 CPU 环境。
 
 ## 环境
 

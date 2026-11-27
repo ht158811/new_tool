@@ -1,4 +1,6 @@
 # Reproducible Windows runtime used by scripts/bootstrap.ps1.
+# PyTorch and TorchVision are installed first by bootstrap.ps1 using the
+# detected CPU/CUDA backend, so they are intentionally not listed here.
 PySide6-Essentials==6.12.0
 Pillow==12.3.0
 numpy==2.2.6; python_version < "3.11"

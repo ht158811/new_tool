@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
+import sys
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -31,6 +33,19 @@ class ModelTestPage(QWidget):
         note.setStyleSheet("color: #7b8491;")
         root.addWidget(title)
         root.addWidget(note)
+        backend_available = importlib.util.find_spec("ultralytics") is not None
+        backend_status = QLabel(
+            ("推理后端可用" if backend_available else "推理后端不可用")
+            + f"　Python：{sys.executable}"
+        )
+        backend_status.setWordWrap(True)
+        backend_status.setStyleSheet(
+            "color: #2e7d32;" if backend_available else "color: #c62828; font-weight: 600;"
+        )
+        backend_status.setToolTip(
+            "若后端不可用，请关闭软件并从项目根目录双击 run.bat 启动。"
+        )
+        root.addWidget(backend_status)
 
         card = QFrame()
         card.setObjectName("card")
@@ -42,13 +57,19 @@ class ModelTestPage(QWidget):
         form.addRow("数据集", self._dataset)
 
         self._model_path = QLineEdit()
-        self._model_path.setPlaceholderText("选择 .pt 或 Ultralytics 支持的模型文件")
+        self._model_path.setPlaceholderText("推荐选择开箱即用的 YOLO .pt 模型")
         model_row = QHBoxLayout()
         model_row.addWidget(self._model_path, 1)
         model_browse = QPushButton("浏览")
         model_browse.clicked.connect(self._browse_model)
         model_row.addWidget(model_browse)
         form.addRow("模型路径", model_row)
+        model_note = QLabel(
+            ".pt 和 TorchScript 使用项目自带的 PyTorch 环境；ONNX/TensorRT 需要额外后端依赖。"
+        )
+        model_note.setStyleSheet("color: #7b8491;")
+        model_note.setWordWrap(True)
+        form.addRow("", model_note)
 
         self._model_type = QComboBox()
         self._model_type.addItem("YOLO 目标检测", ModelType.YOLO_DETECTION)
@@ -87,8 +108,14 @@ class ModelTestPage(QWidget):
         form.addRow("推理参数", parameters)
 
         self._device = QLineEdit()
-        self._device.setPlaceholderText("留空=自动；也可输入 cpu、0、0,1")
+        self._device.setPlaceholderText("推荐留空自动选择；也可输入 cpu、0、0,1")
         form.addRow("运行设备", self._device)
+        device_note = QLabel(
+            "CPU 环境请留空或输入 cpu；只有 CUDA 可用时才能填写 0、1 或 0,1。"
+        )
+        device_note.setStyleSheet("color: #7b8491;")
+        device_note.setWordWrap(True)
+        form.addRow("", device_note)
 
         self._overwrite_existing = QCheckBox("覆盖已有 LabelMe JSON")
         self._overwrite_existing.setToolTip("默认跳过已有 JSON；勾选后，模型结果会替换原标注")
@@ -174,7 +201,7 @@ class ModelTestPage(QWidget):
     def _browse_model(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "选择模型", self._model_path.text(),
-            "模型文件 (*.pt *.onnx *.engine *.torchscript);;所有文件 (*)",
+            "推荐模型 (*.pt *.torchscript);;导出模型 (*.onnx *.engine);;所有文件 (*)",
         )
         if path:
             self._model_path.setText(path)
@@ -254,10 +281,16 @@ class ModelTestPage(QWidget):
         self._report.setPlainText(
             summary + "\n\n标注文件已保存到对应原图片所在目录。"
             "请返回项目首页重新扫描该数据集，以刷新有效标注数量和类别。"
+            + (
+                "\n\n失败详情（最多显示 20 条）：\n"
+                + "\n".join(result.failure_messages)
+                if result.failure_messages else ""
+            )
         )
 
     def _failed(self, message: str) -> None:
         self._status.setText("模型测试失败")
+        self._report.setPlainText(message)
         QMessageBox.critical(self, "模型测试失败", message)
 
     def _worker_finished(self) -> None:

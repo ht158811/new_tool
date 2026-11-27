@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -11,6 +14,7 @@ from dataset_manager.application.model_testing.models import ModelTestConfig, Mo
 from dataset_manager.application.model_testing.service import ModelTestService
 from dataset_manager.domain.models.project import Dataset, Project, TaskType
 from dataset_manager.infrastructure.storage.project_repository import JsonProjectRepository
+from dataset_manager.infrastructure.model_testing.ultralytics_runner import UltralyticsRunner
 
 
 class _Cache:
@@ -120,6 +124,7 @@ class ModelTestServiceTests(unittest.TestCase):
             )
 
             self.assertEqual(runner.predict_calls, 0)
+            self.assertFalse(runner.loaded)
             self.assertEqual(result.skipped_existing, 1)
             self.assertEqual(result.generated_annotations, 0)
             self.assertEqual(json.loads(annotation.read_text(encoding="utf-8")), {"sentinel": True})
@@ -170,6 +175,95 @@ class ModelTestServiceTests(unittest.TestCase):
             self.assertEqual(result.generated_annotations, 0)
             self.assertFalse((root / "one.json").exists())
             self.assertFalse((root / "two.json").exists())
+
+    def test_clamps_model_coordinates_to_image_bounds(self) -> None:
+        class OutOfBoundsRunner(_Runner):
+            def predict(self, image_path: str, config: ModelTestConfig) -> dict[str, object]:
+                return {
+                    "original_shape": [24, 32],
+                    "detections": [{
+                        "class_name": "defect", "confidence": 1.4,
+                        "box_xyxy": [-10, -20, 100, 80],
+                    }],
+                    "segments": [[[0, 0], [float("nan"), 2], [3, 3]]],
+                }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, project, dataset, model, records = self._context(root)
+            ModelTestService(repository, _Cache(records), OutOfBoundsRunner()).execute(
+                self._config(project, dataset, model, ModelType.YOLO_SEGMENTATION)
+            )
+            document = json.loads((root / "sample.json").read_text(encoding="utf-8"))
+            shape = document["shapes"][0]
+            self.assertEqual(shape["shape_type"], "rectangle")
+            self.assertEqual(shape["points"], [[0.0, 0.0], [32, 24]])
+            self.assertEqual(shape["confidence"], 1.0)
+
+    def test_all_prediction_failures_raise_clear_error_and_write_nothing(self) -> None:
+        class FailingRunner(_Runner):
+            def predict(self, image_path: str, config: ModelTestConfig) -> dict[str, object]:
+                self.predict_calls += 1
+                raise RuntimeError("backend unavailable")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, project, dataset, model, records = self._context(
+                root, ("one.jpg", "two.jpg")
+            )
+            with self.assertRaisesRegex(RuntimeError, "所有待处理图片均推理失败"):
+                ModelTestService(repository, _Cache(records), FailingRunner()).execute(
+                    self._config(project, dataset, model)
+                )
+            self.assertFalse((root / "one.json").exists())
+            self.assertFalse((root / "two.json").exists())
+
+    def test_partial_prediction_failure_is_reported_and_success_is_committed(self) -> None:
+        class PartiallyFailingRunner(_Runner):
+            def predict(self, image_path: str, config: ModelTestConfig) -> dict[str, object]:
+                if Path(image_path).name == "one.jpg":
+                    raise OSError("broken image")
+                return super().predict(image_path, config)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, project, dataset, model, records = self._context(
+                root, ("one.jpg", "two.jpg")
+            )
+            result = ModelTestService(
+                repository, _Cache(records), PartiallyFailingRunner()
+            ).execute(self._config(project, dataset, model))
+            self.assertEqual((result.succeeded, result.failed), (1, 1))
+            self.assertIn("one.jpg: OSError: broken image", result.failure_messages)
+            self.assertFalse((root / "one.json").exists())
+            self.assertTrue((root / "two.json").exists())
+
+
+class UltralyticsRunnerTests(unittest.TestCase):
+    def test_device_normalization_rejects_cuda_in_cpu_only_environment(self) -> None:
+        fake_torch = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(
+                is_available=lambda: False,
+                device_count=lambda: 0,
+            )
+        )
+        with patch.dict(sys.modules, {"torch": fake_torch}):
+            with self.assertRaisesRegex(ValueError, "不支持 CUDA"):
+                UltralyticsRunner._normalize_device("cuda:0")
+        self.assertIsNone(UltralyticsRunner._normalize_device("auto"))
+        self.assertEqual(UltralyticsRunner._normalize_device("cpu"), "cpu")
+
+    def test_exported_backend_dependency_is_checked_before_inference(self) -> None:
+        with patch(
+            "dataset_manager.infrastructure.model_testing.ultralytics_runner."
+            "importlib.util.find_spec",
+            return_value=None,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "onnxruntime"):
+                UltralyticsRunner._validate_backend("model.onnx")
+            with self.assertRaisesRegex(RuntimeError, "tensorrt"):
+                UltralyticsRunner._validate_backend("model.engine")
+        UltralyticsRunner._validate_backend("model.pt")
 
 
 if __name__ == "__main__":
